@@ -1,0 +1,187 @@
+---
+title: "data house effects models"
+author: "Mafalda González González"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+# library
+
+```{r, message=F}
+
+rm(list = ls())
+
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+
+library(broom) # lm
+
+library(lme4) # mixed effects models
+library(broom.mixed)
+
+
+# advanced models 
+library(forcats)
+library(caret)
+```
+
+# datasets
+
+## summary of elections results
+
+```{r, eval=F}
+# devtools::install_github("dadosdelaplace/pollspain")
+library(pollspain)
+
+
+e2023 <- summary_election_data("congress", year = 2023) # default: national level => TODO: disclaimer on level and assumption of vote share between parties  on national level 
+e2019a<- summary_election_data("congress", year = 2019)
+e2019n<- summary_election_data("congress", year = 2019)
+e2016 <- summary_election_data("congress", year = 2016)
+e2015 <- summary_election_data("congress", year = 2015)
+e2011 <- summary_election_data("congress", year = 2011)
+e2008 <- summary_election_data("congress", year = 2008)
+e2004 <- summary_election_data("congress", year = 2004)
+e2000 <- summary_election_data("congress", year = 2000)
+e1996 <- summary_election_data("congress", year = 1996)
+e1993 <- summary_election_data("congress", year = 1993)
+e1989 <- summary_election_data("congress", year = 1989)
+e1986 <- summary_election_data("congress", year = 1986)
+e1982 <- summary_election_data("congress", year = 1982)
+
+get_election_results <- function(df, year) {
+  df %>%
+    mutate(
+      year = as.numeric(year)
+    ) %>%
+    select(year, id_elec, id_candidacies, abbrev_candidacies, name_candidacies, porc_candidacies_valid)
+}
+
+
+elections <- list(
+  "1982" = e1982,
+  "1986" = e1986,
+  "1989" = e1989,
+  "1993" = e1993,
+  "1996" = e1996,
+  "2000" = e2000,
+  "2004" = e2004,
+  "2008" = e2008,
+  "2011" = e2011,
+  "2015" = e2015,
+  "2016" = e2016,
+  "2019" = e2019a,
+  "2019" = e2019n,
+  "2023" = e2023
+)
+
+
+all_elections_results <- imap_dfr(elections, get_election_results)
+
+saveRDS(all_elections_results, "all_elections_results.rds")
+```
+
+```{r}
+all_elections_results <- readRDS("./all_elections_results.rds")
+head(all_elections_results)
+```
+
+## historical surveys
+
+```{r}
+# pollspain::summary_survey_data()
+```
+
+```{r}
+load("./historical_surveys.rda")
+ls()
+head(historical_surveys)
+names(historical_surveys)
+```
+
+## final dataset with surveys and election results
+
+```{r}
+survey_elections <- historical_surveys %>%
+  left_join(all_elections_results %>% rename(voting_results_pct = porc_candidacies_valid),
+            by = c("id_elec", "abbrev_candidacies"))
+
+
+head(survey_elections)
+names(survey_elections)
+```
+
+# new vars (feature engineering)
+
+## party_age
+
+```{r}
+# party_age: first year each party appeared and then calculate party age depending on the year of the election 
+
+party_first_year <- all_elections_results %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    first_year = min(year), .groups = "drop"
+    ) 
+
+survey_elections <- survey_elections %>%
+  left_join(party_first_year, by = "abbrev_candidacies") %>%
+  mutate(
+    party_age = year - first_year
+    )
+
+survey_elections$party_age
+head(survey_elections, n=10)
+```
+
+## party_elec_count
+
+```{r}
+# party_elec_count: count previous appearences
+party_election_counts <- all_elections_results %>%
+  distinct(abbrev_candidacies, year) %>% 
+  arrange(abbrev_candidacies, year) %>%
+  group_by(abbrev_candidacies) %>%
+  mutate(
+    party_elec_count = row_number() - 1 # TODO: dic de partidos: contar id_general de cada partido 
+    )
+
+survey_elections <- survey_elections %>%
+  left_join(party_election_counts, by = c("abbrev_candidacies", "year"))
+
+head(survey_elections, n=10)
+```
+
+## first_time
+
+```{r}
+# first_time: binary: if first time presenting then 1 
+survey_elections <- survey_elections %>%
+  mutate(
+    first_time = as.integer(party_elec_count == 0)
+    )
+
+head(survey_elections, n=10)
+```
+
+```{r}
+# check 
+survey_elections %>%
+  select(abbrev_candidacies, year, party_age, party_elec_count, first_time) %>%
+  distinct() %>%
+  arrange(abbrev_candidacies, year) %>%
+  head(20)
+
+head(survey_elections)
+names(survey_elections)
+
+```
+
+```{r}
+saveRDS(survey_elections, "survey_elections.rds")
+```
