@@ -55,7 +55,7 @@ Creation of the initial dataset by merging the election information dataset thro
 
 Performs exploratory analysis of 2023 polling accuracy, contrasting pollster predictions against actual results. Computes party-level and pollster-level errors (MAE, RMSE, signed error), and visualises systematic under- and overestimation across firms. Produces descriptive plots of directional bias, pollster rankings, and distribution of polling errors by party to confirm the presence of measurable house effects in the 2023 contest.
 
-### `3. Data Historical house effects calculation.qmd`
+#### `3. Data Historical house effects calculation.qmd`
 
 Extends the house effects analysis to past elections to test their persistence across cycles and create parallel dataframes for the 2023 and the hisotrical data for downstream usage. Estimates pollster-party average errors historically and compares stability of biases over time. Generates summary tables and plots of pollster deviations across elections, highlighting both (in)consistent tendencies and election-specific shifts.
 
