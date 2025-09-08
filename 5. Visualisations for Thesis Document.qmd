@@ -1,0 +1,1143 @@
+---
+title: "5. Visualisations for Thesis Document"
+author: "Mafalda González González"
+format:
+  docx:
+    reference-doc: "visual exports/word-styles.docx"
+    number-sections: false
+    toc: false
+# global figure & table defaults
+fig-format: svg # or png 
+fig-dpi: 320
+fig-width: 6.3 # ~full text width on A4 with standard margins
+fig-height: 4
+cap-location: top
+tbl-cap-location: top
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+
+# global knitr/plot/table defaults
+knitr::opts_chunk$set(
+  dev = "ragg_png",     # crisp text rendering
+  dpi = 320,
+  fig.width = 6.3,
+  fig.height = 4
+)
+
+# plots: Times New Roman everywhere
+library(ggplot2)
+theme_set(
+  theme_minimal(base_family = "Times New Roman", base_size = 11))
+
+library(flextable)
+library(knitr)
+
+options(ft.page_width_in = 6.3)
+
+options(flextable.print.method = "knitr")
+set_flextable_defaults(
+  font.family = "Times New Roman",
+  font.size   = 11,
+  theme_fun   = theme_booktabs,
+  padding     = 2
+)
+
+
+# Helper: fit any flextable to page width and enable wrapping
+.ft_fit_to_page <- function(x, page_in = getOption("ft.page_width_in", 6.3),
+                            margin = 0.98) {
+  n <- ncol(x$body$dataset)
+  x %>%
+    autofit() %>%                              
+    hrule(rule = "auto") %>%                   
+    set_table_properties(layout = "autofit", width = margin) %>%  
+    width(j = seq_len(n), width = (page_in * margin) / max(n, 1)) 
+}
+
+.orig_knit_print_flextable <- getFromNamespace("knit_print.flextable", "flextable")
+
+# GLOBAL override applied to every flextable
+knit_print_flextable_global <- function(x, ...) {
+  x <- .ft_fit_to_page(x)
+  .orig_knit_print_flextable(x, ...)            
+}
+
+
+registerS3method("knit_print", "flextable",
+                 knit_print_flextable_global,
+                 envir = asNamespace("knitr"))
+
+```
+
+# libraries 
+
+```{r}
+library(flextable)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(lubridate)
+library(stringr)
+library(readr)
+
+library(DataExplorer) # EDA 
+library(skimr)
+library(ggalluvial)
+library(data.table) 
+library(lubridate)
+library(zoo)
+library(forcats)
+
+
+library(showtext)
+systemfonts::font_info("Times New Roman")
+font_add("Times New Roman", regular = "C:\\WINDOWS\\Fonts\\times.ttf")
+showtext_auto()  
+showtext_opts(dpi = 320)
+
+
+
+# party palette 
+party_colors <- c("PP" = "#1db4e8",
+      "PSOE" = "#c30505",
+      "SUMAR" = "#e71853",
+      "PODEMOS" = "#a444b4",
+      "VOX" = "#83b431",
+      "ERC" = "#ffbf41",
+      "ERC-CATSI" = "#ffbf41",
+      "CIU" = "#1b348a",
+      "CDC" = "#1b348a",
+      "DIL" = "#1b348a",
+      "MP" = "#004938",
+      "CS" = "#eb6109",
+      "PNV" = "darkgreen",
+      "BNG" = "lightblue",
+      "EH-BILDU" = "lightgreen",
+      "JXCAT-JUNTS" = "#03cfb4",
+      "CC" = "#2f6da6",
+      "UPN" = "#e72c2e",
+      "NC-BC" = "#81c03b",
+      "UPL" = "#b71966",
+      "EXISTE" = "#227e57",
+      "CUP" = "#fff201",
+      "ECP" = "#a444b4", 
+      "ENMAREA" = "#a444b4",
+      "COMPROMIS" = "#d95827",
+      "IU" = "#a9272f", 
+      "UPYD" = "#e5007d",
+      "AMAIUR" = "#0198b3",
+      "ERPV" = "#ffbf41",
+      "PSA-PA" = "#19a24a",
+      "CDS" = "#b2c544",
+      "AP-PDP-PL" = "#ffa518",
+      "UCD" = "#1a7e36",
+      "PCE" = "#961425",
+      "HB" = "#613000"
+    )
+
+```
+
+# Data
+
+```{r}
+survey_elections <- readRDS("./data/survey_elections.rds")
+
+vis_2023 <- survey_elections %>% 
+  filter(id_elec == "02-2023-07-24")
+vis_hist <- survey_elections %>% 
+  filter(id_elec != "02-2023-07-24")
+
+
+data_2023_EDA <- read_rds("./data/data_2023_EDA.rds")
+data_2023_eval_full <- read_rds("./data/data_2023_eval_full.rds")
+
+election_day <- as.Date(sub("^02-", "", unique(vis_2023$id_elec)))
+
+data_2023_consensus <- read_rds("./data/data_2023_consensus.rds")
+
+pred_store_2_pct <- read_rds("./data/results_models_2_pct.rds")
+pred_store_1_pct <- readRDS("./data/results_models_1_pct.rds")
+
+complete_2023_2_pct <- read_rds("./data/complete_2023_2_pct.rds")
+complete_2023_1_pct <- read_rds("./data/complete_2023_1_pct.rds")
+```
+
+Saving figures: 
+
+```{r}
+dir.create("visual exports", showWarnings = FALSE)
+```
+
+# Table 3.1 
+
+Manual: 
+
+```{r}
+
+table_3_1 <- tribble(
+  ~Dataset, ~`Original obs`, ~`NA election results`, ~`after drop - NA election results`,
+  ~`obs below 2% vote share cutoff`, ~`after drop - 2% vote share cutoff`, ~`Final parties`,
+  "2023",      11210,      3516,      7694,     4712,     2982, "PP, PSOE, Vox, SUMAR",
+  "historical", 18077,      1777,     16300,     5955,    10345, NA_character_
+)
+
+flextable(table_3_1) %>% 
+  autofit()
+
+```
+
+
+# Table 4.1 
+
+```{r}
+data_2023_EDA <- data_2023_EDA %>% 
+  mutate(error = estimated_voting - voting_results_pct)
+
+table_4_1 <- data_2023_EDA %>%  
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    "Vote share" = round(first(voting_results_pct), 2), 
+    "Avg pred" = round(mean(estimated_voting), 2), 
+    "Avg error" = round(mean(error), 2), 
+    "Polls" = n(), 
+    "First year" = first(first_year), 
+    "Party age" = first(party_age), 
+    "Elections" = first(party_elec_count), 
+    "Fieldwork start" = min(fieldwork_start), 
+    "Fieldwork end" = max(fieldwork_end)
+  ) %>% 
+  arrange(desc("Vote share"))
+
+flextable(table_4_1) %>% 
+  autofit()
+```
+
+# Figure 4.1 
+
+```{r}
+year_lab <- first(data_2023_EDA$year)
+
+figure_4_1 <- data_2023_EDA %>%
+  ggplot(aes(x = fct_reorder(abbrev_candidacies, error, .fun = median),
+             y = error, fill = abbrev_candidacies)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  labs(
+    x = "Party", 
+    y = "Polling Error (%)"
+  ) +
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 0, hjust = 1),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  ) +
+  scale_fill_manual(values = party_colors)
+
+figure_4_1
+
+
+ggsave("visual exports/figure_4_1.png", figure_4_1,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+# Figure 4.2
+
+```{r}
+# avg estimate and actual result
+party_summary <- data_2023_EDA %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    avg_poll = mean(estimated_voting),
+    avg_poll_label = paste0(round(avg_poll, 1), "%"),
+    actual_result = mean(voting_results_pct),
+    actual_label = paste0(round(actual_result, 1), "%"),
+    .groups = "drop"
+  )
+
+# more space between bars
+party_summary <- party_summary %>%
+  mutate(x_position = as.numeric(as.factor(abbrev_candidacies)) * 1.5) 
+
+data_2023_EDA_x <- data_2023_EDA %>%
+  mutate(x_position = as.numeric(as.factor(abbrev_candidacies)) * 1.5)
+
+figure_4_2 <- ggplot() +
+  
+  # bar: actual results
+  geom_col(data = party_summary,
+           aes(x = x_position, y = actual_result, fill = abbrev_candidacies),
+           width = 0.6, 
+           alpha = 0.5) + 
+  
+  geom_text(data = party_summary,
+          aes(x = x_position, y = -1, label = actual_label, colour = abbrev_candidacies), fontface = "bold", size = 3) +
+
+  # points: individual poll estimates
+  geom_jitter(data = data_2023_EDA_x,
+              aes(x = x_position, y = estimated_voting, colour = abbrev_candidacies),
+              width = 0.2, size = 0.7) +
+
+  # segments line: avg estimated vote share total
+  geom_segment(data = party_summary,
+               aes(x = x_position, 
+                 xend = x_position + 0.8,
+                 y = avg_poll, yend = avg_poll),
+               colour = "black", linewidth = 0.7) +
+
+  geom_text(data = party_summary,
+            aes(x = x_position + 1.1, 
+                y = avg_poll, 
+                label = avg_poll_label),
+            colour = "black", 
+            fontface = "bold", 
+            size = 4,
+            hjust = 1, # aligns to the right
+            vjust = -0.4) + # sits on top of the line
+  
+  # custom spacing 
+  scale_x_continuous(
+    breaks = party_summary$x_position,
+    labels = party_summary$abbrev_candidacies
+  ) +
+  
+  scale_fill_manual(values = party_colors) +
+  scale_colour_manual(values = party_colors) +
+
+  labs(
+    x = "Party",
+    y = "Vote Share (%)"
+  ) +
+  
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1),
+    panel.grid.major.x = element_blank(), 
+    panel.grid.minor.x = element_blank(), 
+    legend.position = "none"
+    )
+
+figure_4_2
+
+
+ggsave("visual exports/figure_4_2.png", figure_4_2,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+
+```
+
+# Figure 4.3 
+
+```{r}
+figure_4_3 <- data_2023_EDA %>% 
+  ggplot(aes(x = fct_reorder(polling_firm, error, .fun = median), 
+             y = error, 
+             fill = abbrev_candidacies)) + 
+  geom_boxplot(outlier.alpha = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~abbrev_candidacies, nrow = 1) +
+  scale_fill_manual(values = party_colors) + 
+  coord_flip() +
+  labs( 
+    x = "Polling Firm",
+    y = "Polling Error (%)"
+  ) +
+  theme_minimal(base_family = "Times New Roman") + 
+   theme(
+    axis.text.y = element_blank(), 
+    legend.position = "none" 
+    )
+
+figure_4_3
+
+
+ggsave("visual exports/figure_4_3.png", figure_4_3,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+
+# Table 4.2
+
+```{r}
+keep_historical <- vis_hist %>% 
+  distinct(polling_firm) %>% 
+  pull(polling_firm) 
+
+# data for plots 
+plots_23 <- data_2023_eval_full %>%
+  filter(
+    abbrev_candidacies %in% c("VOX", "PP", "PSOE"),
+    polling_firm %in% keep_historical
+  ) %>%
+  mutate(error = estimated_voting - voting_results_pct)
+
+he_23 <- plots_23 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(error_avg = mean(error, na.rm = TRUE), .groups = "drop")
+
+# mae (party-balanced, it is based on error_avg)
+mae_23 <- he_23 %>%
+  group_by(polling_firm) %>%
+  summarise(mae = mean(abs(error_avg), na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mae))
+
+table_4_2 <- # top 5 and worst 5 (with rank within each group)
+top_5 <- mae_23 %>% arrange(mae) %>% slice_head(n = 5) %>%
+  mutate(group = "Top 5", rank = row_number())
+
+worst_5 <- mae_23 %>% arrange(desc(mae)) %>% slice_head(n = 5) %>%
+  mutate(group = "Worst 5", rank = row_number())
+
+# ranks
+rank_table <- bind_rows(top_5, worst_5) %>%
+  mutate(ranked_label = paste0(rank, ". ", polling_firm)) %>%
+  arrange(match(group, c("Top 5","Worst 5")), rank)
+
+table_4_2 <- rank_table %>%
+  select(Rank = ranked_label, MAE = mae, Group = group)
+
+flextable(table_4_2) %>%
+  autofit()
+
+```
+
+# Figure 4.4
+
+```{r}
+# Plot 
+he_ranked <- he_23 %>%
+  semi_join(rank_table, by = "polling_firm") %>%
+  left_join(rank_table %>% select(polling_firm, group, ranked_label),
+            by = "polling_firm")
+
+# facet order: first the top row (Top 5), then the bottom (Worst 5)
+panel_levels <- c(
+  rank_table %>% filter(group == "Top 5")   %>% arrange(rank) %>% pull(ranked_label),
+  rank_table %>% filter(group == "Worst 5") %>% arrange(rank) %>% pull(ranked_label)
+)
+
+he_ranked <- he_ranked %>%
+  mutate(panel = ranked_label,
+         panel = factor(panel, levels = panel_levels))
+
+figure_4_4 <- ggplot(he_ranked,
+       aes(x = fct_reorder(abbrev_candidacies, error_avg), y = error_avg,
+           fill = abbrev_candidacies)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(values = party_colors, guide = "none") +
+  coord_flip() +
+  facet_wrap(~ panel, nrow = 2) +
+  labs(
+    x = "Party", y = "Average bias (pp)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+  
+figure_4_4
+
+
+ggsave("visual exports/figure_4_4.png", figure_4_4,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+# Figure 4.5 
+
+```{r}
+# filtering 
+plot23 <- data_2023_eval_full %>%
+  filter(
+    abbrev_candidacies %in% c("VOX", "PP", "PSOE"),
+    polling_firm %in% keep_historical
+  ) %>%
+  mutate(error = estimated_voting - voting_results_pct)
+
+# mae 
+mae_overall_2023 <- plot23 %>%
+  group_by(polling_firm) %>%
+  summarise(mae_overall = mean(abs(error), na.rm = TRUE), .groups = "drop")
+
+# house effects
+he_summary_2023 <- plot23 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(error_avg = mean(error, na.rm = TRUE), .groups = "drop") %>%
+  left_join(mae_overall_2023, by = "polling_firm") %>%
+  mutate(
+    bias_direction = if_else(error_avg > 0, "Overestimate", "Underestimate"),
+    # ranked by overall MAE; set .desc = TRUE to put least biased at the top
+    polling_firm = fct_reorder(polling_firm, mae_overall, .desc = TRUE)
+  )
+
+
+# plot 
+figure_4_5 <- ggplot(he_summary_2023, aes(x = error_avg, y = polling_firm, fill = bias_direction)) +
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_wrap(~ abbrev_candidacies) +   # same order across facets
+  scale_fill_manual(values = c("Overestimate" = "steelblue", "Underestimate" = "tomato")) +
+  labs(
+    x = "Average Estimation Error (pp)",
+    y = "Pollster",
+    fill = "Bias"
+  ) +
+  theme_minimal(base_family = "Times New Roman")
+
+figure_4_5
+
+
+ggsave("visual exports/figure_4_5.png", figure_4_5,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+# Figure 4.6 
+
+```{r}
+# filter
+plot_hist <- vis_hist %>%
+  filter(
+    abbrev_candidacies %in% c("VOX", "PP", "PSOE"),
+    polling_firm %in% keep_historical
+  ) %>%
+  mutate(error = estimated_voting - voting_results_pct)
+
+# last 6 elections 
+recent6_ids <- plot_hist %>%
+  group_by(id_elec) %>%
+  summarise(
+    election_date = as.Date(sub("^02-", "", unique(id_elec))), 
+    elec_date = max(election_date, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(elec_date)) %>%
+  slice_head(n = 6) %>%
+  pull(id_elec)
+
+
+plot_hist <- plot_hist %>%
+  filter(id_elec %in% recent6_ids) %>%
+  mutate(id_elec = factor(id_elec, levels = recent6_ids))
+
+# mae
+mae_overall_hist <- plot_hist %>%
+  group_by(polling_firm) %>%
+  summarise(mae_overall = mean(abs(error), na.rm = TRUE), .groups = "drop")
+
+# house effects 
+he_summary_hist <- plot_hist %>%
+  group_by(id_elec, polling_firm, abbrev_candidacies) %>%
+  summarise(error_avg = mean(error, na.rm = TRUE), .groups = "drop") %>%
+  left_join(mae_overall_hist, by = "polling_firm") %>%
+  mutate(
+    bias_direction = if_else(error_avg > 0, "Overestimate", "Underestimate"),
+    polling_firm = fct_reorder(polling_firm, mae_overall, .desc = TRUE)  # least biased at top
+  )
+
+# Plot 
+figure_4_6 <- ggplot(he_summary_hist,
+       aes(x = error_avg, y = polling_firm, fill = bias_direction)) +
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_grid(id_elec ~ abbrev_candidacies, scales = "free_y") +
+  scale_fill_manual(values = c(Overestimate = "steelblue", Underestimate = "tomato")) +
+  labs(
+    x = "Average Estimation Error (pp)",
+    y = "Pollster",
+    fill = "Bias"
+  ) +
+  theme_minimal(base_family = "Times New Roman") + 
+  theme(
+    axis.text.y = element_blank()
+  )
+
+figure_4_6
+
+
+ggsave("visual exports/figure_4_6.png", figure_4_6,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+# Figure 4.7
+
+```{r}
+n_polls23 <- Inf
+
+# preceeding election to 2023
+election_before_2023 <- vis_hist %>% 
+  distinct(id_elec) %>% 
+  slice_head() %>% 
+  pull()
+
+# historical house effects
+hist_he <- vis_hist %>%
+  filter(abbrev_candidacies %in% c("PP","PSOE","VOX"),
+         polling_firm %in% keep_historical, 
+         id_elec %in% election_before_2023) %>%
+  mutate(error = estimated_voting - voting_results_pct) %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(error_hist = mean(error, na.rm = TRUE),
+            n_hist     = n(), .groups = "drop")
+
+# 2023 house effects 
+plot23 <- data_2023_eval_full %>%
+  filter(abbrev_candidacies %in% c("PP","PSOE","VOX"),
+         polling_firm %in% keep_historical) %>%
+  mutate(
+    error = estimated_voting - voting_results_pct,
+    poll_date = coalesce(fieldwork_end, fieldwork_start)
+  ) %>% 
+  filter(!is.na(poll_date)) %>%
+  arrange(desc(poll_date)) %>%
+  slice_head(n = n_polls23)
+
+he_2023 <- plot23 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(error_2023 = mean(error, na.rm = TRUE),
+            n_2023     = n(), .groups = "drop")
+
+# join, Plot
+stab <- hist_he %>%
+  inner_join(he_2023, by = c("polling_firm","abbrev_candidacies"))
+
+# symmetric limits & 1:1 aspect
+rng <- max(abs(c(stab$error_hist, stab$error_2023)), na.rm = TRUE)
+
+figure_4_7 <- ggplot(stab, aes(x = error_hist, y = error_2023, colour = abbrev_candidacies)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_point(aes(size = pmin(n_hist, n_2023)), alpha = 0.8) +
+  
+  scale_color_manual(values = party_colors) +
+  coord_equal(xlim = c(-rng, rng), ylim = c(-rng, rng)) +
+  labs(
+    x = "Historical house effect (mean signed error, pp)",
+    y = "2023 house effect (mean signed error, pp)",
+    colour = "Party",
+    size = "Obs"
+  ) +
+  theme_minimal(base_family = "Times New Roman")
+
+figure_4_7
+
+
+ggsave("visual exports/figure_4_7.png", figure_4_7,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+# Table 4.3 
+
+```{r}
+comparison_new_pollsters <- data_2023_eval_full %>% 
+  filter(is_new_pollster, first_time == 0) %>% # new pollster, historical parties 
+  summarise(
+    .by = abbrev_candidacies,
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),
+    MAE_avg = mean(abs(debiased_estimate_avg - voting_results_pct), na.rm = TRUE), 
+    MAE_bMAE = mean(abs(debiased_estimate_bMAE - voting_results_pct), na.rm = TRUE),
+    MAE_bRMSE = mean(abs(debiased_estimate_bRMSE - voting_results_pct), na.rm = TRUE)
+  )
+
+comparison_new_pollsters_long <- comparison_new_pollsters %>% 
+  pivot_longer(
+    cols = -abbrev_candidacies,
+    names_to = c("metric", "method"),
+    names_sep = "_",
+    values_to = "value"
+  )
+
+comparison_new_pollsters_long$method <- factor(
+  comparison_new_pollsters_long$method, 
+  levels = c("raw", "avg", "bMAE", "bRMSE"))
+
+
+table_4_3 <- comparison_new_pollsters  %>%
+  select(Parties = abbrev_candidacies, MAE_raw = MAE_raw, MAE_hist = MAE_avg, MAE_bMAE = MAE_bMAE, MAE_bRMSE = MAE_bRMSE)
+
+flextable(table_4_3) %>%
+  autofit()
+```
+
+# Table 4.4 
+
+```{r}
+comparison_hist_pollsters <- data_2023_eval_full %>% 
+  filter(!is_new_pollster, first_time == 0) %>% # established pollsters, historical parties
+  summarise(
+    .by = abbrev_candidacies,
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),# baseline MAE of the raw (uncorrected) estimated_voting
+    MAE_avg = mean(abs(debiased_estimate_avg - voting_results_pct), na.rm = TRUE), 
+    MAE_bMAE = mean(abs(debiased_estimate_bMAE - voting_results_pct), na.rm = TRUE),
+    MAE_bRMSE = mean(abs(debiased_estimate_bRMSE - voting_results_pct), na.rm = TRUE)
+  )
+
+comparison_hist_pollsters_long <- comparison_hist_pollsters %>% 
+  pivot_longer(
+    cols = -abbrev_candidacies,
+    names_to = c("metric", "method"),
+    names_sep = "_",
+    values_to = "value"
+  )
+
+comparison_hist_pollsters_long$method <- factor(
+  comparison_hist_pollsters_long$method, 
+  levels = c("raw", "avg", "bMAE", "bRMSE"))
+
+
+
+table_4_4 <- comparison_hist_pollsters %>%
+  select(Parties = abbrev_candidacies, MAE_raw = MAE_raw, MAE_hist = MAE_avg, MAE_bMAE = MAE_bMAE, MAE_bRMSE = MAE_bRMSE)
+  
+flextable(table_4_4) %>%
+  autofit()
+```
+
+# Table 4.5 
+
+```{r}
+
+comparison_all_pollsters <- data_2023_eval_full %>% 
+  summarise(
+    .by = abbrev_candidacies,
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE), # baseline MAE of the raw (uncorrected) estimated_voting
+    MAE_avg = mean(abs(debiased_estimate_avg - voting_results_pct), na.rm = TRUE), 
+    MAE_bMAE = mean(abs(debiased_estimate_bMAE - voting_results_pct), na.rm = TRUE),
+    MAE_bRMSE = mean(abs(debiased_estimate_bRMSE - voting_results_pct), na.rm = TRUE)
+  )
+
+comparison_all_pollsters_long <- comparison_all_pollsters %>% 
+  pivot_longer(
+    cols = -abbrev_candidacies,
+    names_to = c("metric", "method"),
+    names_sep = "_",
+    values_to = "value"
+  )
+
+
+comparison_all_pollsters_long$method <- factor(
+  comparison_all_pollsters_long$method, 
+  levels = c("raw", "avg", "bMAE", "bRMSE"))
+
+lvl_methods <- c("raw","avg","bMAE","bRMSE")
+
+# just in case: 
+comparison_new_pollsters_long  <- comparison_new_pollsters_long   %>%  
+  mutate(method = factor(method, levels = lvl_methods))
+
+comparison_hist_pollsters_long <- comparison_hist_pollsters_long %>% 
+  mutate(method = factor(method, levels = lvl_methods))
+
+comparison_all_pollsters_long  <- comparison_all_pollsters_long   %>%  
+  mutate(method = factor(method, levels = lvl_methods))
+
+
+
+comparison_3_long <- bind_rows(
+  comparison_new_pollsters_long  %>% mutate(pollster_type = "New"),
+  comparison_hist_pollsters_long %>% mutate(pollster_type = "Historical"), 
+  comparison_all_pollsters_long %>% mutate(pollster_type = "All"), 
+)
+
+# summary across parties by pollster type × method
+summary_table <- comparison_3_long %>%
+  group_by(pollster_type, metric, method) %>%
+  summarise(
+    mean_error = mean(value, na.rm = TRUE),
+    median_error = median(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(metric, pollster_type, method)
+
+table_4_5 <- summary_table %>%
+  group_by(pollster_type, metric) %>%
+  mutate(
+    min_mean = min(mean_error,   na.rm = TRUE),
+    min_median = min(median_error, na.rm = TRUE),
+    is_mean_winner   = is.finite(mean_error)   & mean_error   <= min_mean + 1e-12,
+    is_median_winner = is.finite(median_error) & median_error <= min_median + 1e-12,
+    mean_error_disp   = ifelse(is_mean_winner,   sprintf("%.3f ★", mean_error),
+                                                  sprintf("%.3f",    mean_error)),
+    median_error_disp = ifelse(is_median_winner, sprintf("%.3f ★", median_error),
+                                                  sprintf("%.3f",    median_error))
+  ) %>%
+  ungroup() %>%
+  arrange(metric, pollster_type, method) %>%
+  select(pollster_type, metric, method, mean_error_disp, median_error_disp)
+
+table_4_5 <- table_4_5  %>%
+  filter(pollster_type == "All") %>% 
+  select(Method = method, "Mean Error" = mean_error_disp, "Median Error" = median_error_disp)
+
+table_4_5
+  
+flextable(table_4_5) %>%
+  autofit()
+```
+
+# Figure 4.8
+
+```{r}
+figure_4_8 <- 
+ggplot(
+  comparison_all_pollsters_long %>% filter(metric == "MAE"),
+  aes(x = abbrev_candidacies, y = value, fill = method)
+) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(
+    values = c("raw" = "gold1", "avg" = "orangered",
+               "bMAE" = "darkseagreen3", "bRMSE" = "darkcyan"),
+    labels = c("Raw", "Average", "Bench (MAE)", "Bench (RMSE)")
+  ) +
+  labs(
+    x = "Party", y = "Mean Absolute Error", fill = "Method"
+  ) +
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1), 
+    panel.grid.major.x = element_blank(), 
+    panel.grid.minor.x = element_blank(),
+    )
+
+figure_4_8
+
+
+ggsave("visual exports/figure_4_8.png", figure_4_8,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+# Table 4.6 
+
+```{r}
+# avg_result
+avg_results_2023 <- data_2023_consensus %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    avg_prediction = mean(estimated_voting, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+results_consensus <- data_2023_consensus %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise( 
+    
+    # resultados imaginarios = ponderamos el resultado de cada encuesta en funcion de nuestros weights 
+    weighted_results_MAE_rating = weighted.mean(estimated_voting, combined_weight_MAE, na.rm = TRUE), 
+    weighted_results_RMSE_rating = weighted.mean(estimated_voting, combined_weight_RMSE, na.rm = TRUE), 
+    .groups = "drop"
+  ) 
+
+
+# added to the benchmark vs actual dataset
+bench_vs_actual <- results_consensus %>%
+  left_join(
+    vis_2023 %>% distinct(abbrev_candidacies, voting_results_pct),
+    by = c("abbrev_candidacies")
+  ) %>%
+  left_join(avg_results_2023, by = c("abbrev_candidacies"))
+
+table_4_6 <- bench_vs_actual %>%
+  select(Parties = abbrev_candidacies, "Weighted results (MAE)" = weighted_results_MAE_rating,  "Weighted results (RMSE)"= weighted_results_RMSE_rating, "Actual vote share" = voting_results_pct, "Avg predictions" = avg_prediction)
+
+table_4_6
+
+flextable(table_4_6) %>%
+  autofit()
+```
+
+
+# Figure 4.9
+
+```{r}
+
+figure_4_9 <- ggplot(bench_vs_actual %>%
+         mutate(abbrev_candidacies = fct_reorder(abbrev_candidacies, voting_results_pct, .desc = TRUE)),
+       aes(x = abbrev_candidacies, group = abbrev_candidacies)) +
+  # actual voteshare
+  geom_col(aes(y = voting_results_pct, fill = abbrev_candidacies),
+           alpha = 0.5, position = "dodge") +
+  
+  # MAE pollster rating estimations
+  geom_point(aes(y = weighted_results_MAE_rating, shape = "Benchmark (MAE)"),
+             position = position_dodge(width = 0.9), size = 2.5, colour = "black") +
+  
+  # RMSE pollster rating estimations
+  geom_point(aes(y = weighted_results_RMSE_rating, shape = "Benchmark (RMSE)"),
+             position = position_dodge(width = 0.9), size = 2.5, colour = "black") +
+  
+  # Average estimation based on all polls per election (possibly reducing partisan effect?)
+  geom_point(aes(y = avg_prediction, shape = "Average predictions"),
+             position = position_dodge(width = 0.9), size = 2.5, colour = "purple") +
+  
+  scale_fill_manual(values = party_colors, guide = "none") +
+  scale_shape_manual(values = c("Benchmark (MAE)" = 16,   # circle
+                                "Benchmark (RMSE)" = 17,  # triangle
+                                "Average predictions" = 15), # square
+                    name = "Estimate") +
+  
+  labs(
+    x = "Party", y = "Vote Share (%)"
+  ) +
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1), 
+    panel.grid.major.x = element_blank(), 
+    panel.grid.minor.x = element_blank(),
+    )
+
+
+
+figure_4_9
+
+
+ggsave("visual exports/figure_4_9.png", figure_4_9,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+# Table 4.7 
+
+```{r}
+# general 
+results_reg_2_pct <- pred_store_2_pct %>%
+  group_by(model) %>%
+  summarise(
+    RMSE = sqrt(mean((pred - obs)^2, na.rm = TRUE)),
+    MAE = mean(abs(pred - obs), na.rm = TRUE),
+    Rsquared = cor(pred, obs, use = "complete.obs")^2,
+    .groups = "drop"
+  )
+
+# best of each in general
+rankings <- results_reg_2_pct %>%
+  mutate(
+    rank_mae = rank(MAE, ties.method = "min"),
+    rank_rmse = rank(RMSE, ties.method = "min"),
+    rank_r2   = rank(-Rsquared, ties.method = "min") # higher is better
+  )
+
+table_4_7 <- rankings %>%
+  mutate(
+    MAE = sprintf("%.3f%s", MAE, ifelse(rank_mae == 1, " ★", ifelse(rank_mae == 2, " ☆", ""))),
+    RMSE = sprintf("%.3f%s", RMSE, ifelse(rank_rmse == 1, " ★", ifelse(rank_rmse == 2, " ☆", ""))),
+    Rsquared = sprintf("%.3f%s", Rsquared, ifelse(rank_r2 == 1, " ★", ifelse(rank_r2 == 2, " ☆", "")))
+  )
+
+table_4_7 <- table_4_7 %>%
+  select(Model = model, MAE = MAE, RMSE = RMSE, Rsquared = Rsquared)
+  
+
+flextable(table_4_7) %>%
+  autofit()
+
+```
+
+
+# Figure 4.10
+
+```{r}
+figure_4_10 <- complete_2023_2_pct %>%
+  select(abbrev_candidacies, error_original, error_lm_before, error_lm_during) %>%
+  pivot_longer(
+    c(error_original, error_lm_before, error_lm_during),
+    names_to = "type", values_to = "error"
+  ) %>%
+  mutate(type = recode(type,
+                       error_original   = "Original ",
+                       error_lm_before  = "Corrected (Before)",
+                       error_lm_during  = "Corrected (During)")) %>%
+  ggplot(aes(x = fct_reorder(abbrev_candidacies, error, .fun = median, .desc = TRUE),
+             y = error, fill = type)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Party",
+    y = "Error (Estimate − Actual, pp)",
+    fill = "Predictions"
+  ) +
+  coord_flip() +
+  theme_minimal(base_family = "Times New Roman")
+
+
+figure_4_10
+
+
+ggsave("visual exports/figure_4_10.png", figure_4_10,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+
+# Figure 4.11
+
+```{r}
+
+# function for per firm mae
+delta_mae_by_firm <- function(df, pred_col, label) {
+  df %>%
+    group_by(polling_firm) %>%
+    summarise(
+      MAE_original = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),
+      MAE_corrected = mean(abs(.data[[pred_col]] - voting_results_pct), na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      delta = MAE_corrected - MAE_original,  # negative = improvement
+      improved = delta < 0,
+      type = label
+    )
+}
+
+# table
+d_before_2_pct <- delta_mae_by_firm(complete_2023_2_pct, "pred_lm_before", "Corrected (Before)")
+d_during_2_pct <- delta_mae_by_firm(complete_2023_2_pct, "pred_lm_during", "Corrected (During)")
+
+beat_pollsters_both_2_pct <- bind_rows(d_before_2_pct, d_during_2_pct)
+
+
+# ranking
+order_by_best_2_pct <- beat_pollsters_both_2_pct %>%
+  group_by(polling_firm) %>%
+  summarise(best_delta = min(delta, na.rm = TRUE), .groups = "drop") %>%
+  arrange(best_delta) %>%
+  pull(polling_firm)
+
+
+
+# Plot
+figure_4_11 <- ggplot(
+  beat_pollsters_both_2_pct %>%
+    mutate(polling_firm = factor(polling_firm, levels = order_by_best_2_pct)),
+  aes(x = polling_firm, y = delta, fill = improved)
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  facet_wrap(~ type) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "seagreen3", "FALSE" = "tomato"),
+                    labels = c("TRUE" = "Improved",
+                               "FALSE" = "Worse/Equal")) +
+  labs(
+    x = "Polling Firm", y = "Δ MAE (pp)", fill = ""
+  ) +
+  theme_minimal(base_size = 12)
+
+figure_4_11
+
+
+ggsave("visual exports/figure_4_11.png", figure_4_11,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+
+# Figure 5.1
+
+```{r}
+# table
+d_before_1_pct <- delta_mae_by_firm(complete_2023_1_pct, "pred_rf_before", "Corrected (Before)")
+d_during_1_pct <- delta_mae_by_firm(complete_2023_1_pct, "pred_knn_during", "Corrected (During)")
+
+beat_pollsters_both_1_pct <- bind_rows(d_before_1_pct, d_during_1_pct)
+
+
+# ranking
+order_by_best_1_pct <- beat_pollsters_both_1_pct %>%
+  group_by(polling_firm) %>%
+  summarise(best_delta = min(delta, na.rm = TRUE), .groups = "drop") %>%
+  arrange(best_delta) %>%
+  pull(polling_firm)
+
+
+# Plot
+figure_5_1 <- ggplot(
+  beat_pollsters_both_1_pct %>%
+    mutate(polling_firm = factor(polling_firm, levels = order_by_best_1_pct)),
+  aes(x = polling_firm, y = delta, fill = improved)
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  facet_wrap(~ type) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "seagreen3", "FALSE" = "tomato"),
+                    labels = c("TRUE" = "Improved",
+                               "FALSE" = "Worse/Equal")) +
+  labs(
+    x = "Polling Firm", y = "Δ MAE (pp)", fill = ""
+  ) +
+  theme_minimal(base_size = 12)
+
+figure_5_1
+
+ggsave("visual exports/figure_5_1.png", figure_5_1,
+                width = 6.3, height = 4, dpi = 320,
+                device = ragg::agg_png)
+```
+
+# Appendix A
+
+```{r}
+# general 
+results_reg_1_pct <- pred_store_1_pct %>%
+  group_by(model) %>%
+  summarise(
+    RMSE = sqrt(mean((pred - obs)^2, na.rm = TRUE)),
+    MAE = mean(abs(pred - obs), na.rm = TRUE),
+    Rsquared = cor(pred, obs, use = "complete.obs")^2,
+    .groups = "drop"
+  )
+
+results_reg_1_pct %>%
+  arrange(MAE)
+
+# best of each in general
+best_mae_1_pct <- results_reg_1_pct %>% 
+  slice_min(MAE, n = 1, with_ties = FALSE) %>%
+  pull(model)
+
+best_rmse_1_pct <- results_reg_1_pct %>%
+  slice_min(RMSE, n = 1, with_ties = FALSE) %>%
+  pull(model)
+
+best_r2_1_pct <- results_reg_1_pct %>% 
+  slice_max(Rsquared, n = 1, with_ties = FALSE) %>% 
+  pull(model)
+
+
+table_appendix_A <- results_reg_1_pct %>%
+  mutate(
+    MAE = ifelse(model == best_mae_1_pct, 
+                 sprintf("%.3f ★", MAE),      
+                 sprintf("%.3f", MAE)),
+    
+    RMSE = ifelse(model == best_rmse_1_pct, 
+                  sprintf("%.3f ★", RMSE),     
+                  sprintf("%.3f", RMSE)),
+    
+    Rsquared = ifelse(model == best_r2_1_pct, 
+                      sprintf("%.3f ★", Rsquared),
+                      sprintf("%.3f", Rsquared))
+  )
+
+table_appendix_A
+
+flextable(table_appendix_A) %>%
+  autofit()
+
+```
+

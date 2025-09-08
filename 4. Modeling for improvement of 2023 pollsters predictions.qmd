@@ -1,0 +1,1841 @@
+---
+title: "4. Modeling for improvement of 2023 pollsters predictions"
+author: "Mafalda González González"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+```{r global_options, include=T, echo = F}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, eval=T)
+options(scipen = 999)
+```
+
+# library
+
+```{r}
+
+rm(list = ls())
+
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(lubridate)
+library(stringr)
+library(readr)
+
+
+library(DataExplorer) # EDA 
+library(skimr) 
+library(ggalluvial)
+library(data.table) 
+library(lubridate)
+library(zoo)
+
+library(PerformanceAnalytics) # descriptive modeling
+library(corrplot)
+
+library(broom) # lm
+library(lme4)
+library(broom.mixed)
+
+library(forcats) # cross validation
+library(caret)
+
+
+
+# party palette 
+party_colors <- c("PP" = "#1db4e8",
+      "PSOE" = "#c30505",
+      "SUMAR" = "#e71853",
+      "PODEMOS" = "#a444b4",
+      "VOX" = "#83b431",
+      "ERC" = "#ffbf41",
+      "ERC-CATSI" = "#ffbf41",
+      "CIU" = "#1b348a",
+      "CDC" = "#1b348a",
+      "DIL" = "#1b348a",
+      "MP" = "#004938",
+      "CS" = "#eb6109",
+      "PNV" = "darkgreen",
+      "BNG" = "lightblue",
+      "EH-BILDU" = "lightgreen",
+      "JXCAT-JUNTS" = "#03cfb4",
+      "CC" = "#2f6da6",
+      "UPN" = "#e72c2e",
+      "NC-BC" = "#81c03b",
+      "UPL" = "#b71966",
+      "EXISTE" = "#227e57",
+      "CUP" = "#fff201",
+      "ECP" = "#a444b4", 
+      "ENMAREA" = "#a444b4",
+      "COMPROMIS" = "#d95827",
+      "IU" = "#a9272f", 
+      "UPYD" = "#e5007d",
+      "AMAIUR" = "#0198b3",
+      "ERPV" = "#ffbf41",
+      "PSA-PA" = "#19a24a",
+      "CDS" = "#b2c544",
+      "AP-PDP-PL" = "#ffa518",
+      "UCD" = "#1a7e36",
+      "PCE" = "#961425",
+      "HB" = "#613000"
+    )
+
+```
+
+# Data
+
+We load the data we have prepared in "**2. House effects 2023 calculation + EDA**" and "**3. Data Historical house effects calculation**".
+
+```{r}
+data_2023_eval_full <- readRDS("./data/data_2023_eval_full.rds")
+data_hist_consensus <-  readRDS("./data/data_hist_consensus.rds")
+```
+
+# TRAINING on historical data
+
+> Aim: test whether different correction strategies and modelling approaches improve the accuracy of forecasting electoral outcomes.
+
+We train models on the historical dataset (`df_hist`) and later test how well they generalise to the 2023 election (`df_2023`).
+
+Roadmap:
+
+1.  Preparation of data
+
+We prepare two datasets:
+
+-   `df_hist` = historical data (training), which includes true past election results
+-   `df_2023` = current election (test), which simulates the "real" setting where we try to forecast the outcome
+
+We materialize two columns fror both datasets: `correction_final` (what we subtract) and `debiased_estimate_final` (what we feed to models), plus a `method_final` tag. That way, when we train a model it will always use the same corrections variables.
+
+We select the predictors relevant for modelling (poll estimates, correction terms, poll metadata), convert them to numeric, and drop incomplete rows. For the historical data we also add a `row_id` variable, which allows us to track observations during cross-validation and later reattach election/party/pollster labels to predictions.
+
+-   We keep `id_elec`, `abbrev_candidacies`, `polling_firm` for diagnostics and later joins; they are not predictors in caret models below.
+
+To avoid collinearity issues, we check correlations among numeric predictors. Strongly correlated predictors (\> 0.65) risk distorting regression results and inflating model variance for LMs, as well as confuse importance rankings in ML. We compare correlations in both historical and 2023 datasets to ensure consistency.
+
+2.  Fitting of models on df_hist
+
+-   Dependent variable: voting_results_pct (true past election results)
+-   Predictors: poll estimates (estimated_voting, debiased_estimates), correction terms (correction_final), poll info (sample_size, etc)
+-   e.g. Linear models, Random Forest, etc.
+-   Cross-validate within history with leave-one-election-out folds ("LOEO") (See cross validation section for more info)
+
+3.  Comparison of CV folds in df_hist
+
+4.  Prediction on df_2023
+
+## 1. Data preparation
+
+### Correction variables
+
+```{r}
+# selection of method to carry forward
+# options: "historical_avg", "benchmark_mae", "benchmark_rmse"
+method <- "benchmark_mae"  
+
+# final correction + estimate + method tag
+df_2023 <- mutate(
+  data_2023_eval_full,
+  correction_final = correction_bMAE, 
+  
+  debiased_estimate_final = estimated_voting - correction_final,
+  
+  method_final = method
+)
+
+# check
+head(df_2023)
+
+
+# selection of method to carry forward
+# options: "avg", "benchmark_mae", "benchmark_rmse"
+method <- "benchmark_mae"  
+
+df_hist <- data_hist_consensus %>%
+  mutate(
+    # correction term depends on method chosen
+    correction_final = error_avg_MAE_rating,
+    
+    # debiased estimate (raw - correction)
+    debiased_estimate_final = estimated_voting - correction_final,
+    
+    method_final = method
+    
+  )
+
+
+# quick check
+head(df_hist)
+
+```
+
+### Feature selection
+
+We have to assess collinearity!
+
+```{r}
+# historical data 
+df_hist_num <- df_hist %>% 
+  select(c(n_field_days, sample_size, party_elec_count, party_age, first_time)) %>% 
+  drop_na()
+ 
+chart.Correlation(df_hist_num)
+corrplot(cor(df_hist_num))
+corr_matrix <- cor(df_hist_num, use = "complete.obs")
+plot_correlation(corr_matrix)
+
+subset(as.data.frame(as.table(corr_matrix)), abs(Freq) > 0.65 & Var1 != Var2) # take out >65 correlation
+
+# 2023 data 
+df_2023_num <- df_2023 %>% 
+  select(c(n_field_days, sample_size, party_elec_count, party_age, first_time)) %>% 
+  drop_na()
+ 
+chart.Correlation(df_2023_num)
+corrplot(cor(df_2023_num))
+corr_matrix <- cor(df_2023_num, use = "complete.obs")
+plot_correlation(corr_matrix)
+
+subset(as.data.frame(as.table(corr_matrix)), abs(Freq) > 0.65 & Var1 != Var2) # take out >65 correlation
+```
+
+The correlation analysis shows that `party_age` is highly collinear with other predictors, so we remove it from both datasets
+
+```{r}
+# historical data 
+df_hist_num <- df_hist_num %>% 
+  select(-party_age) 
+
+chart.Correlation(df_hist_num)
+corrplot(cor(df_hist_num))
+corr_matrix <- cor(df_hist_num, use = "complete.obs")
+plot_correlation(corr_matrix)
+
+subset(as.data.frame(as.table(corr_matrix)), abs(Freq) > 0.65 & Var1 != Var2) 
+
+# 2023 data 
+df_2023_num <- df_2023_num %>% 
+  select(-party_age) 
+
+chart.Correlation(df_2023_num)
+corrplot(cor(df_2023_num))
+corr_matrix <- cor(df_2023_num, use = "complete.obs")
+plot_correlation(corr_matrix)
+
+subset(as.data.frame(as.table(corr_matrix)), abs(Freq) > 0.65 & Var1 != Var2) 
+```
+
+Thus we use the variables: n_field_days, sample_size, estimated_voting, party_elec_count, first_time
+
+### Setup & data slices
+
+```{r}
+set.seed(70901) 
+
+# dataset: we keep only the columns we will use
+predictors <- c(
+  "estimated_voting",
+  "correction_final",
+  "sample_size",
+  "n_field_days",
+  "party_elec_count",
+  "first_time",
+  "debiased_estimate_final"
+)
+
+outcome <- "voting_results_pct"
+
+df_hist <- df_hist %>%
+  select(id_elec, abbrev_candidacies, polling_firm, all_of(outcome), all_of(predictors)) %>%
+  mutate(across(all_of(predictors), as.numeric)) %>%
+  drop_na(all_of(c(outcome, predictors))) %>% 
+  mutate(row_id = row_number())  # stable row ids for later joins
+
+# 2023 (not used for CV here, but kept for later)
+df_2023 <- df_2023 %>%
+  select(id_elec, abbrev_candidacies,  polling_firm, all_of(outcome), all_of(predictors)) %>%
+  mutate(across(all_of(predictors), as.numeric)) %>%
+  drop_na(all_of(predictors)) # 2023 true outcome may be NA in “real” nowcasting
+```
+
+## 2. Predictive Modeling
+
+### Theory
+
+> Aim: The goal of this stage is to assess whether different correction strategies (raw vs. debiased poll estimates) and modelling approaches improve the accuracy of electoral forecasting. Specifically, we want to test whether bias corrections applied before modelling (pre-debiasing) perform better than bias adjustments within the model (including correction terms as predictors).
+
+**Methodology**:
+
+-   Dependent variable: the true vote share of each party in past elections (`voting_results_pct`)
+-   Predictors: poll estimates (`estimated_voting` or `debiased_estimate_final`), correction terms for correction during modeling (`correction_final`), and poll characteristics (`sample_size`, `n_field_days`, `party_elec_count`, `first_time`).
+-   Approach: models are trained on the historical dataset (`df_hist`) and evaluated with leave-one-election-out cross-validation (LOEO). This simulates a "before election" setting, where one election is unseen and must be predicted from the structure learned on all previous ones.
+-   Validation logic: training within history allows us to quantify generalisation. Once the best performing approach is identified, it is then applied to predict the 2023 election.
+
+**Branches of modeling**:
+
+0.  Baseline: a model excluding poll estimates, to establish a lower bound on predictive accuracy and explore whether metadata alone explains outcomes.
+
+1.  Correction during modelling: we use raw estimates plus explicit bias terms (`estimated_voting` + `correction_final`) as predictors. The model itself learns how much bias to subtract.
+
+2.  Correction before modelling: we use pre-debiased estimates (`debiased_estimate_final`) as predictor. The correction is baked into the data, and the model does not explicitly include house effects as predictors.
+
+**Methods tested**:
+
+-   Linear regression (lm): benchmark parametric approach for baseline, correction during and before modeling
+-   Random Forests (rf): captures non-linearities and interactions, tunable by ntree, mtry, and min.node.size
+-   Neural networks (nnet): flexible learners for non-linear structures, tested across hidden unit sizes and decay penalties
+-   k-nearest neighbours (kknn): non-parametric baseline relying on local similarity
+
+> **SUMMARY**: Goal: Train on historical polls (`df_hist`) and test whether models can recover true vote share (`voting_results_pct`) out-of-sample—first via cross-validation inside history (LOEO), later on `df_2023`. Design: We compare two strategies: (1) use raw poll estimates (`estimated_voting`) and model bias during training via `correction_final`, and (2) use pre-corrected poll estimates (`debiased_estimate_final`) as inputs and let the model focus on remaining structure.
+
+**MODELS**:
+
+0.  Baseline model: predict vote share directly (without `estimated_voting` + `correction_final` or `debiased_estimates_final` as predictors)
+
+-   Assumption: we assess how well other survey metadata (`n_field_days`, `sample_size`) and party/election experience (`party_elec_count`, `first_time`) explain actual voting results - without poll estimates. This model stands apart from the house effect framework, and acts as a non-poll baseline, anchoring expectations and providing a comparison point for poll-based models, which should do meaningfully better than this structural baseline.
+
+1.a. Normal - correction during modeling: include bias (`estimated_voting` + `correction_final`) as a predictor
+
+-   Assumption: house effect bias can be captured by adding pollster-level effects directly into the model, without pre-adjusting the data. The raw estimate carries most of the signal, while `correction_final` encodes firm-party bias patterns we computed upstream (consensus-anchored).
+-   Support: from descriptive model 2, whereby bias is systematic and accounting for it improves prediction
+-   Formula: `lm(voting_results_pct \~ estimated_voting + correction_final + n_field_days + ...)`
+
+1.b ML rf - correction during modeling
+
+-   Assumption: raw poll estimates contain signal, and random forest captures non-linear patterns and interactions with other predictors
+-   Support: Random forest is a strong non-parametric learner, suitable for high-dimensional data with complex relationships.
+-   Formula: `randomForest(voting_results_pct ~ estimated_voting + correction_final + n_field_days + ...)`
+
+1.c ML nn - correction during modeling
+
+-   Assumption: neural networks can model complex, non-linear relationships between raw estimates, poll features, and actual voting outcomes.
+-   Support: NN may outperform linear models in capturing interactions (e.g. estimated_voting × first_time).
+-   Formula: `nnet(voting_results_pct ~ estimated_voting + correction_final + n_field_days + ...)`
+
+1.d ML knn - correction during modeling
+
+-   Assumption: similar polls (in terms of estimates and metadata) tend to have similar outcomes. No need to learn a global model.
+-   Support: Simple, local learner useful as a non-parametric sanity check against more flexible models.
+-   Formula: `kknn(voting_results_pct ~ estimated_voting + correction_final + n_field_days + ...)`
+
+2.a Normal - correction before modeling: using corrected estimates as the predictor variable
+
+-   Assumption: the bias is a form of measurement error that can be corrected before modelling. Q: "If we fix measurement bias upstream, does a simple linear mapping to truth suffice?"
+-   Support: from descriptive model 4, whereby house effects are accounted for through debiased estimates
+-   Formula: `lm(voting_results_pct ~ debiased_estimate + n_field_days + ...)` (no correction_final!)
+
+2.b ML rf - correction before modeling
+
+-   Assumption: debiased estimates already correct for systematic house effects; RF captures remaining structure and interactions. *If bias removal helps, we will probably see slightly lower RMSE and/or simpler optimal settings*
+-   Support: Comparison with 1.c reveals whether pre-correcting simplifies the learning task.
+-   Formula: `randomForest(voting_results_pct ~ debiased_estimate_final + n_field_days + ...)`
+
+2.c ML nn - correction before modeling
+
+-   Assumption: with systematic bias removed, the NN focuses on residual patterns linking corrected estimates to vote outcomes.
+-   Support: Potentially smoother convergence and lower error with cleaner inputs. Compare also especially to 1.d
+-   Formula: `nnet(voting_results_pct ~ debiased_estimate_final + n_field_days + ...)`
+
+2.d ML knn - correction before modeling
+
+-   Assumption: KNN will perform better when trained on cleaner, debiased data.
+-   Support: Easier local generalisation when systemic bias is removed. Also, KNN as a simple, local learner useful as a non-parametric sanity check against more flexible models.
+-   Formula: `kknn(voting_results_pct ~ debiased_estimate_final + n_field_days + ...)`
+
+### CV: Cross Validation set up
+
+We cross-validate across elections with a Leave-One-Election-Out design. This simulates a "before election" setting, where one election is unseen and must be predicted from the structure learned on all previous ones.
+
+-   Why LOEO?: Polls within the same election share context (campaign, issues, shocks). Holding out one election at a time (Leave-One-Election-Out) gives a tougher, more realistic check of generalisation to unseen contests.
+
+-   We pass custom training indices to trainControl(index=...). Caret then forms the test fold as the complement (the held-out election).
+
+-   Scaling: We set preProcess=c("center","scale") inside train(), so scaling is re-estimated within each training fold and applied to its test fold only—no peeking across elections.
+
+-   Storing results: caret keeps fold-level predictions in model\$pred. We standardise these into a single long table `pred_store` with columns: `model`, `row_id`, `id_elec`, `abbrev_candidacies`, `polling_firm`, `obs`, `pred`. This lets us compute metrics by election/party later and plot observed vs predicted without refitting models.
+
+#### Custom folds for caret: LOEO
+
+each fold hold out one election (id_elec)
+
+```{r}
+set.seed(70901)
+
+# id_elec as factor 
+df_hist$id_elec <- as.factor(df_hist$id_elec)
+
+# unique elections
+unique_elections <- levels(df_hist$id_elec)
+
+# custom LOEO folds: TRAIN indices per fold (caret infers TEST as the complement)
+folds <- lapply(unique_elections, function(elec) {
+  which(df_hist$id_elec != elec) # indices for training
+})
+names(folds) <- paste0("Fold_", unique_elections)
+
+# caret control 
+ctrl_loeo <- trainControl(
+  method = "cv", # caret still expects "cv"
+  index = folds, # our custom folds
+  savePredictions = "final"
+)
+```
+
+#### Scaling
+
+Scaling inside each fold, not globally, to avoid leakage =\> we will set preProcess = c("center", "scale") within the models.
+
+#### Storing resulst
+
+Test results storing: predictions per election: Caret saves predictions per fold if savePredictions = "final" =\> allows us to check performance per election, not just globally
+
+-   caret stores CV predictions in model\$pred =\> we bring back which election each row belongs to via the row_id we added to df_hist
+
+```{r}
+pred_store <- tibble() # master store to append models
+
+```
+
+### Execution
+
+This is the execution of the models. If you would like to see the results without running these models, which take quite a while, feel free to go directly to the "\### Comparison" section, where a Rds of the results can be loaded.
+
+#### 0. Baseline model: predict vote share directly (no polls)
+
+```{r}
+
+# training
+m_lm_baseline <- train(voting_results_pct ~
+                         estimated_voting + 
+                         n_field_days + 
+                         sample_size + 
+                         party_elec_count + 
+                         first_time,
+                       data = df_hist,
+                       method = "lm",
+                       trControl = ctrl_loeo,
+                       preProcess = c("center","scale")
+                       )
+
+# prediction
+pred_baseline <- m_lm_baseline$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_lm_baseline",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = pred # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_baseline)
+
+```
+
+-   Assumption: we assess how well other covariates (e.g. first_time, n_field_days, party_elec_count...) explain actual voting results, without poll estimates.
+-   Purpose: Not to evaluate poll accuracy, but to explore structural determinants of vote share. This model stands apart from the house effect framework, and acts as a non-poll baseline, providing a comparison point for poll-based models possible improvements.
+
+#### 1.a. Normal - correction during modeling: include bias (estimated_voting + correction_final) as a predictor
+
+```{r}
+
+# training
+m_lm_during <- train(voting_results_pct ~ 
+                       estimated_voting + correction_final + 
+                       n_field_days + 
+                       sample_size + 
+                       party_elec_count +
+                       first_time,
+                     data = df_hist,
+                     method = "lm",
+                     trControl = ctrl_loeo,
+                     preProcess = c("center","scale")
+                     )
+
+# prediction
+pred_lm_during <- m_lm_during$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_lm_during",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = pred # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_lm_during)
+
+```
+
+#### 1.b ML rf - correction during modeling
+
+##### grid
+
+We use ranger for speed and stability. We fine tune the model to explore how different numbers of trees (ntree) affect prediction performance. We run a loop to train Random Forests with varying values of num.trees, mtry and min.node.size, recording the resulting RMSE and R^2^ to identify the best-performing configuration.
+
+Since this loop is computationally intensive, it is set to eval = FALSE. However, the results from one complete run are saved and shown in the table below.
+
+```{r, eval=F}
+
+# Zero Variance check
+nzv_check <- nearZeroVar(df_hist, saveMetrics = TRUE)
+print(nzv_check)
+sum(nzv_check$zeroVar) # 0
+sum(nzv_check$nzv) # 0 
+
+# if (any(nzv_check$nzv)) {
+  # training_noVar <- training[, !nzv_check$nzv]
+  # testing_noVar  <- testing[, colnames(training_noVar)]  # align columns
+# }
+
+
+# tree grid 
+ntree_values <- c(100, 250, 500, 750, 1000)
+rf_results_during <- tibble(ntree = integer(), 
+                            RMSE = numeric(), 
+                            Rsquared = numeric(), 
+                            mtry = numeric(), 
+                            min_node_size = numeric()
+                            )
+
+# keeping models to retrieve the best one (and not have to wait again)
+list_m_rf_during <- vector("list", length(ntree_values))
+names(list_m_rf_during) <- paste0("nt", ntree_values)
+
+# loop 
+for (i in seq_along(ntree_values)) {
+   
+  nt <- ntree_values[i]
+  set.seed(70901 + nt) # small jitter per ntree to stabilise results across runs
+  
+  m_rf_during <- train(voting_results_pct ~ 
+                         estimated_voting + correction_final + 
+                         n_field_days + 
+                         sample_size + 
+                         party_elec_count + 
+                         first_time, 
+                       data = df_hist,
+                       method = "ranger",
+                       trControl = ctrl_loeo,
+                       preProcess = c("center","scale"), # theoretically not requiered 
+                       tuneGrid = expand.grid(
+                         mtry = c(1, 2, 3, 4, 5),
+                         splitrule = "variance", # required for regression
+                         min.node.size = c(5, 10, 20) 
+                         ),
+                       num.trees = nt,
+                       importance = "permutation" # recommended importance for ranger
+  )
+  
+  # best row from carets resampled results
+  best_row <- m_rf_during$results %>%
+    arrange(RMSE) %>% # select the combination with the best performance (by default, lowest RMSE)
+    slice(1)
+  
+  rf_results_during <- bind_rows(
+    rf_results_during,
+    tibble(
+      ntree = nt,
+      RMSE = best_row$RMSE,
+      Rsquared = best_row$Rsquared, 
+      mtry = m_rf_during$bestTune$mtry,
+      min_node_size = m_rf_during$bestTune$min.node.size
+    )
+  )
+  
+  # storing model
+  list_m_rf_during[[paste0("nt", nt)]] <- m_rf_during
+  
+}
+
+
+# check: # we can ignore warning if most folds are valid => if some RMSE entries are NA in results, that usually reflects one unstable tuning combo in a single fold => its fine if the best combo is stable across most folds
+
+m_rf_during$results %>% filter(is.na(RMSE)) # => checking out how many RMSE values are NA => if only one or two combinations in one or two folds it is not a major issue => if yes, we need to reduce complexity or increase min.node.size.
+
+# no NA RMSE => all good 
+
+
+rf_results_during
+
+saveRDS(rf_results_during, file = "./data/rf_results_during.rds")
+
+
+final_m_rf_during_100 <- list_m_rf_during[["nt100"]]
+saveRDS(final_m_rf_during_100, file = "./data/final_m_rf_during_100.rds")
+
+final_m_rf_during_250 <- list_m_rf_during[["nt250"]]
+saveRDS(final_m_rf_during_250, file = "./data/final_m_rf_during_250.rds")
+
+final_m_rf_during_500 <- list_m_rf_during[["nt500"]]
+saveRDS(final_m_rf_during_500, file = "./data/final_m_rf_during_500.rds")
+
+final_m_rf_during_750 <- list_m_rf_during[["nt750"]]
+saveRDS(final_m_rf_during_750, file = "./data/final_m_rf_during_750.rds")
+
+final_m_rf_during_1000 <- list_m_rf_during[["nt750"]]
+saveRDS(final_m_rf_during_1000, file = "./data/final_m_rf_during_1000.rds")
+
+
+rf_results_during <- readRDS("./data/rf_results_during.rds")
+
+rf_results_during
+
+```
+
+Hand stored results:
+
+```{r, eval=F}
+rf_results_during_keep <- data.frame(
+  ntree = c(100, 250, 500, 750, 1000),
+  RMSE = c(4.834657, 4.827837, 4.827540, 4.830417, 4.838233),
+  Rsquared = c(0.8857609, 0.8868417, 0.8873453, 0.8871469, 0.8720.88737286600), 
+  mtry = c(2, 2, 2, 2, 2), 
+  min_node_size = c(20, 20, 20, 10, 5)
+)
+
+
+rf_results_during_keep
+```
+
+We pick the ntree row with the lowest RMSE and carry that fitted object forward to extract fold-predictions into `pred_store.`
+
+Best num.trees value = 100, mtry = 2, min_node_size = 5
+
+##### final model
+
+```{r}
+# if you have loaded all RandomForest models, use #1 instead of #2: 
+
+# 1
+# best_index <- 500
+# final_m_rf_during <- list_m_rf_during[[paste0("nt", best_index)]]
+# m_rf_during <- final_m_rf_during
+
+#2 
+final_m_rf_during <- readRDS("./data/final_m_rf_during_500.rds")
+m_rf_during <- final_m_rf_during
+
+# prediction
+pred_rf_during <- final_m_rf_during$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_rf_during",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = as.numeric(pred) # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_rf_during)
+
+# plot 
+plot(final_m_rf_during)
+
+```
+
+The plot shows the effect of varying the number of randomly selected predictors (mtry) on the Random Forest model's RMSE. As mtry increases from 1 to 2, RMSE drops substantially. Afterwards however, the performance goes worse again with a higher RMSE.
+
+#### 1.c ML nn - correction during modeling
+
+```{r}
+set.seed(70901)
+
+# training
+m_nn_during <- train(voting_results_pct ~ 
+                       estimated_voting + correction_final +
+                       n_field_days + 
+                       sample_size + 
+                       party_elec_count + 
+                       first_time, 
+                     data = df_hist,
+                     method = "nnet",
+                     trControl = ctrl_loeo,
+                     tuneGrid = expand.grid(size = c(3, 4, 5, 6, 7, 8, 9, 10, 11), decay = c(0.01, 0.1, 0.5, 0.7, 0.9)),
+                     linout = TRUE)
+
+# prediction
+pred_nn_during <- m_nn_during$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_nn_during",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = pred # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_nn_during)
+
+# plot
+plot(m_nn_during)
+m_nn_during
+
+```
+
+The plot shows that the best neural network performance is achieved with size = 11 and decay = 0.7, which minimises RMSE.
+
+#### 1.d ML knn - correction during modeling
+
+```{r}
+set.seed(70901)
+
+# training
+m_knn_during <- train(voting_results_pct ~ 
+                       estimated_voting + correction_final +
+                       n_field_days + 
+                       sample_size + 
+                       party_elec_count + 
+                       first_time, 
+                      data = df_hist,
+                      method = "kknn",
+                      trControl = ctrl_loeo,
+                      tuneGrid = data.frame(kmax = seq(1, 10, 2), distance=2, kernel='optimal'))  # kmax variation => odd numbers to reduce ties
+
+# prediction
+pred_knn_during <- m_knn_during$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_knn_during",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = pred # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_knn_during)
+
+# plot
+plot(m_knn_during)
+```
+
+#### 2.a Normal - correction before modelling: using corrected estimates as the predictor variable
+
+```{r}
+# training
+m_lm_before <- train(voting_results_pct ~ 
+                       debiased_estimate_final + 
+                       n_field_days + 
+                       sample_size + 
+                       party_elec_count + 
+                       first_time, 
+                     data = df_hist,
+                     method = "lm",
+                     trControl = ctrl_loeo)
+
+# prediction
+pred_lm_before <- m_lm_before$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_lm_before",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = pred # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_lm_before)
+
+
+```
+
+#### 2.b ML rf - correction before modeling
+
+##### grid
+
+Since this loop is computationally intensive, it is set to eval = FALSE. However, the results from one complete run are saved and shown in the table below.
+
+```{r, eval=F}
+# Zero Variance check
+nzv_check <- nearZeroVar(df_hist, saveMetrics = TRUE)
+print(nzv_check)
+sum(nzv_check$zeroVar) # 0
+sum(nzv_check$nzv) # 0 
+
+# if (any(nzv_check$nzv)) {
+  # training_noVar <- training[, !nzv_check$nzv]
+  # testing_noVar  <- testing[, colnames(training_noVar)]  # align columns
+# }
+
+
+# tree grid 
+ntree_values <- c(100, 250, 500, 750, 1000)
+rf_results_before <- tibble(ntree = integer(), 
+                            RMSE = numeric(), 
+                            Rsquared = numeric()
+                            )
+
+# keeping models to retrieve the best one (and not have to wait again)
+list_m_rf_before <- vector("list", length(ntree_values))
+names(list_m_rf_before) <- paste0("nt", ntree_values)
+
+# loop 
+for (i in seq_along(ntree_values)) {
+   
+  nt <- ntree_values[i]
+  set.seed(70901 + nt)  # small jitter per ntree to stabilise results across runs
+  
+  m_rf_before <- train(voting_results_pct ~ 
+                         debiased_estimate_final + 
+                         n_field_days + 
+                         sample_size + 
+                         party_elec_count + 
+                         first_time, 
+                       data = df_hist,
+                       method = "ranger",
+                       trControl = ctrl_loeo,
+                       preProcess = c("center","scale"), # theoretically not requiered 
+                       tuneGrid = expand.grid(
+                         mtry = c(1, 2, 3, 4, 5),
+                         splitrule = "variance", # required for regression
+                         min.node.size = c(5, 10, 20) 
+                         ),
+                       num.trees = nt,
+                       importance = "permutation" # recommended importance for ranger
+  )
+  
+  # best row from carets resampled results
+  best_row <- m_rf_before$results %>%
+    arrange(RMSE) %>% # select the combination with the best performance (by default, lowest RMSE)
+    slice(1)
+  
+  rf_results_before <- bind_rows(
+    rf_results_before,
+    tibble(
+      ntree = nt,
+      RMSE = best_row$RMSE,
+      Rsquared = best_row$Rsquared, 
+      mtry = m_rf_before$bestTune$mtry,
+      min_node_size = m_rf_before$bestTune$min.node.size
+    )
+  )
+  
+  # storing model
+  list_m_rf_before[[paste0("nt", nt)]] <- m_rf_before
+  
+}
+
+rf_results_before
+
+saveRDS(rf_results_before, file = "./data/rf_results_before.rds")
+
+ 
+final_m_rf_before_100 <- list_m_rf_before[["nt100"]]
+saveRDS(final_m_rf_before_100, file = "./data/final_m_rf_before_100.rds")
+
+final_m_rf_before_250 <- list_m_rf_before[["nt250"]]
+saveRDS(final_m_rf_before_250, file = "./data/final_m_rf_before_250.rds")
+
+final_m_rf_before_500 <- list_m_rf_before[["nt500"]]
+saveRDS(final_m_rf_before_500, file = "./data/final_m_rf_before_500.rds")
+
+final_m_rf_before_750 <- list_m_rf_before[["nt750"]]
+saveRDS(final_m_rf_before_750, file = "./data/final_m_rf_before_750.rds")
+
+final_m_rf_before_1000 <- list_m_rf_before[["nt750"]]
+saveRDS(final_m_rf_before_1000, file = "./data/final_m_rf_before_1000.rds")
+
+
+rf_results_before <- readRDS("./data/rf_results_before.rds")
+
+```
+
+Hand stored results
+
+```{r, eval=F}
+rf_results_before_keep <- data.frame( 
+  ntree = c(100, 250, 500, 750, 1000),
+  RMSE = c(4.838886, 4.900356, 4.916059, 4.872408, 4.901778),
+  Rsquared = c(0.8807419, 0.8810812, 0.8815656, 0.8837688, 0.8827459), 
+  mtry = c(2, 2, 2, 2, 2), 
+  min_node_size = c(5, 20, 20, 20, 20)
+)
+
+rf_results_before_keep
+```
+
+##### final model
+
+```{r}
+# if you have loaded all RandomForest models, use #1 instead of #2: 
+
+# 1
+# best_index <- 100
+# final_m_rf_before <- list_m_rf_before[[paste0("nt", best_index)]]
+# m_rf_before <- final_m_rf_before
+
+#2 
+final_m_rf_before <- readRDS("./data/final_m_rf_before_100.rds")
+m_rf_before <- final_m_rf_before
+
+# prediction
+pred_rf_before <- final_m_rf_before$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_rf_before",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = pred # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_rf_before)
+
+# plot 
+
+plot(final_m_rf_before)
+
+```
+
+As mtry increases from 1 to 2, RMSE drops substantially. Afterwards it goes up again.
+
+#### 2.c ML nn - correction before modeling
+
+```{r}
+# training
+m_nn_before <- train(voting_results_pct ~ 
+                       debiased_estimate_final + 
+                       n_field_days + 
+                       sample_size + 
+                       party_elec_count + 
+                       first_time, 
+                     data = df_hist,
+                     method = "nnet",
+                     trControl = ctrl_loeo,
+                     tuneGrid = expand.grid(size = c(3, 4, 5, 6, 7, 8, 9, 10, 11), decay = c(0.01, 0.1, 0.5, 0.7, 0.9)),
+                     linout = TRUE)
+
+# prediction
+pred_nn_before <- m_nn_before$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_nn_before",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = pred # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_nn_before)
+
+# plot
+
+plot(m_nn_before)
+m_nn_before
+
+```
+
+best: size = 6, decay = 0.7
+
+#### 2.d ML knn - correction before modeling
+
+```{r}
+# training
+m_knn_before <- train(voting_results_pct ~ 
+                       debiased_estimate_final + 
+                       n_field_days + 
+                       sample_size + 
+                       party_elec_count + 
+                       first_time, 
+                      data = df_hist,
+                      method = "kknn",
+                      trControl = ctrl_loeo, 
+                      tuneGrid = data.frame(kmax = seq(1, 10, 2), distance=2, kernel = "optimal")
+                      )
+
+# prediction
+pred_knn_before <- m_knn_before$pred %>%
+  mutate(row_id = as.integer(rowIndex)) %>%
+  left_join(
+    df_hist %>% select(row_id, id_elec, abbrev_candidacies, polling_firm, voting_results_pct),
+    by = "row_id"
+  ) %>%
+  transmute(
+    model = "m_knn_before",
+    row_id,
+    id_elec,
+    abbrev_candidacies,
+    polling_firm,
+    obs = voting_results_pct,  # observed (true) vote share
+    pred = pred # CV prediction for the held-out election
+  )
+
+pred_store <- bind_rows(pred_store, pred_knn_before)
+
+# plot
+
+plot(m_knn_before)
+
+```
+
+#### Saving results
+
+We keep `pred_store` as the our results table for model comparison. Below, we compute MAE/RMSE/R^2^ by election and overall, and build observed-vs-predicted plots using only this table, no re-fitting required.
+
+```{r, eval=F}
+saveRDS(pred_store, file = "./data/results_models_2_pct.rds")
+```
+
+## Comparison
+
+```{r, eval=F}
+pred_store <- readRDS("./data/results_models_2_pct.rds")
+unique(pred_store$model)
+```
+
+Strategy:
+
+compute MAE/RMSE/R^2^ by election and overall, and build observed-vs-predicted plots using only this table—no re-fitting required.
+
+-   Predictive accuracy / performance: MAE, RMSE, R^2^
+
+-   Visualisations: actual vs predictive vote share by model
+
+-   Prediction intervals: using a simple conformal prediction framework using symmetric absolute residuals to visualise model uncertainty and identify observations where predictions diverge from reality
+
+-   Robustness to overfitting
+
+### Predictive Accuracy
+
+Clean summary of RMSE, MAE, and R² for each model
+
+```{r}
+# general 
+results_reg <- pred_store %>%
+  group_by(model) %>%
+  summarise(
+    RMSE = sqrt(mean((pred - obs)^2, na.rm = TRUE)),
+    MAE = mean(abs(pred - obs), na.rm = TRUE),
+    Rsquared = cor(pred, obs, use = "complete.obs")^2,
+    .groups = "drop"
+  )
+
+# best of each in general
+rankings <- results_reg %>%
+  mutate(
+    rank_mae = rank(MAE, ties.method = "min"),
+    rank_rmse = rank(RMSE, ties.method = "min"),
+    rank_r2   = rank(-Rsquared, ties.method = "min") # higher is better
+  )
+
+results_reg_pretty <- rankings %>%
+  mutate(
+    MAE = sprintf("%.3f%s", MAE, ifelse(rank_mae == 1, " ★", ifelse(rank_mae == 2, " ☆", ""))),
+    RMSE = sprintf("%.3f%s", RMSE, ifelse(rank_rmse == 1, " ★", ifelse(rank_rmse == 2, " ☆", ""))),
+    Rsquared = sprintf("%.3f%s", Rsquared, ifelse(rank_r2 == 1, " ★", ifelse(rank_r2 == 2, " ☆", "")))
+  )
+
+
+
+# LOEO CV leaderboard
+print(results_reg_pretty)
+
+# all elections
+pred_store %>%
+  group_by(id_elec, model) %>%
+  summarise(
+    RMSE = sqrt(mean((pred - obs)^2, na.rm = TRUE)),
+    MAE  = mean(abs(pred - obs), na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  arrange(MAE)
+
+```
+
+Best best: m_lm_before, then m_lm_during
+
+Fun table:
+
+```{r}
+library(gt)
+
+
+# best of each in general
+best_mae <- results_reg %>% 
+  slice_min(MAE, n = 1, with_ties = FALSE) %>%
+  pull(model)
+
+best_rmse <- results_reg %>%
+  slice_min(RMSE, n = 1, with_ties = FALSE) %>%
+  pull(model)
+
+best_r2 <- results_reg %>% 
+  slice_max(Rsquared, n = 1, with_ties = FALSE) %>% 
+  pull(model)
+
+
+results_reg %>%
+  gt() %>%
+  tab_style(
+    style = list(cell_fill(color = "#FFE4B5"), 
+                 cell_text(weight = "bold")),
+    locations = cells_body(columns = MAE,      
+                           rows = model == best_mae)
+    
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#B0E0E6"), 
+                 cell_text(weight = "bold")),
+    locations = cells_body(columns = RMSE,    
+                           rows = model == best_rmse)
+  ) %>%
+  
+  tab_style(
+    style = list(cell_fill(color = "#C1E1C1"),
+                 cell_text(weight = "bold")),
+    locations = cells_body(columns = Rsquared, 
+                           rows = model == best_r2)
+  ) %>%
+  
+  fmt_number(columns = c(MAE, RMSE, Rsquared), 
+             decimals = 3) %>%
+  
+  tab_header(title = "Average performance by model (LOEO CV)")
+
+```
+
+2023 hold-out performance: absolute and % improvements over polling-only baseline
+
+```{r}
+# filter predictions for 2023 only
+holdout_2023 <- pred_store %>%
+  filter(id_elec == "02-2019-11-10") %>%   # adapt ID to your convention
+  group_by(model) %>%
+  summarise(
+    MAE  = mean(abs(pred - obs), na.rm = TRUE),
+    RMSE = sqrt(mean((pred - obs)^2, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# add deltas vs polling-only baseline (e.g., "m_lm_baseline")
+baseline <- holdout_2023 %>% filter(model == "m_lm_baseline")
+holdout_2023 <- holdout_2023 %>%
+  mutate(
+    dMAE  = MAE  - baseline$MAE,
+    dRMSE = RMSE - baseline$RMSE,
+    pct_MAE  = 100 * (baseline$MAE  - MAE)  / baseline$MAE,
+    pct_RMSE = 100 * (baseline$RMSE - RMSE) / baseline$RMSE
+  )
+
+holdout_2023
+
+```
+
+```{r}
+results_long <- results_reg %>%
+  pivot_longer(cols = c(MAE, RMSE, Rsquared), names_to = "metric", values_to = "value") %>%
+  group_by(metric) %>%
+  mutate(
+    is_winner = if_else(metric == "Rsquared",
+                        value == max(value, na.rm = TRUE),
+                        value == min(value, na.rm = TRUE))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    highlight = ifelse(is_winner, metric, "Other")
+  )
+
+cols <- c(
+  "MAE" = "darkorange1",
+  "RMSE" = "deepskyblue3",
+  "Rsquared" = "darkseagreen3",
+  "Other" = "grey80"
+)
+
+ggplot(results_long, aes(x = reorder(model, value), y = value, fill = highlight)) +
+  geom_col() +
+  facet_wrap(~ metric, scales = "free_y") +
+  scale_fill_manual(values = cols, guide = "none") +
+  labs(
+    title = "Overall winners by metric (highlighted)",
+    subtitle = "MAE & RMSE: lower is better • R²: higher is better",
+    x = "Model", y = "Score"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+
+```
+
+```{r}
+# MAE per election x model
+by_elec <- pred_store %>%
+  group_by(id_elec, model) %>%
+  summarise(
+    MAE  = mean(abs(pred - obs), na.rm = TRUE),
+    RMSE = sqrt(mean((pred - obs)^2, na.rm = TRUE)), 
+    .groups = "drop"
+  )
+
+# year from id_elec 
+by_elec <- by_elec %>%
+  mutate(year = as.Date(str_extract(id_elec, "\\d{4}-\\d{2}-\\d{2}")))
+
+# aggregation to YEAR x MODEL 
+by_year_model <- by_elec %>%
+  group_by(year, model) %>%
+  summarise(MAE = mean(MAE, na.rm = TRUE), .groups = "drop")
+
+# flag winner (lowest MAE) within each year
+winners <- by_year_model %>%
+  group_by(year) %>%
+  mutate(is_winner = MAE == min(MAE, na.rm = TRUE)) %>%
+  ungroup()
+
+# color palette: winners get their model color, non-winners grey
+model_levels <- sort(unique(winners$model))
+model_colors <- setNames(scales::hue_pal()(length(model_levels)), model_levels)
+
+winners <- winners %>%
+  mutate(fill_grp = ifelse(is_winner, model, "Other"))
+
+fill_vals <- c(model_colors, Other = "grey80")
+
+# Plot: winners colored, others grey; faceted by year
+ggplot(winners, aes(x = model, y = MAE, fill = fill_grp)) +
+  geom_col() +
+  facet_wrap(~ year, scales = "free_y") +
+  scale_fill_manual(values = fill_vals, guide = "none") +
+  labs(
+    title = "Best MAE per Year (winner highlighted by model color)",
+    x = "Model", y = "MAE"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+
+```
+
+### Visualisations: actual vs predictive vote share by model
+
+#### MAE vs RMSE of models
+
+```{r}
+by_elec_long <- by_elec %>%
+  pivot_longer(c(RMSE, MAE), names_to = "metric", values_to = "value")
+
+# Variant A
+# order: baseline => LMs => RFs => NNs => KNNs
+order_A <- c(
+  "m_lm_baseline",
+  "m_lm_before",  "m_lm_during",
+  "m_rf_before",  "m_rf_during",
+  "m_nn_before",  "m_nn_during",
+  "m_knn_before", "m_knn_during"
+)
+
+
+levels_A <- intersect(order_A, unique(by_elec_long$model))
+
+
+by_elec_long %>%
+  group_by(model, metric) %>%
+  summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(model = factor(model, levels = levels_A)) %>%
+  ggplot(aes(x = model, y = value, fill = model)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~ metric, scales = "free_y") +
+  labs(title = "Model performance (mean across elections)",
+       subtitle = "Order: baseline → LM → RF → NN → KNN",
+       x = "Model", y = "Error (MAE / RMSE)") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_blank()
+    )
+
+
+```
+
+```{r}
+# Variant B
+# Order: all 'before' models => baseline => all 'during' models (mirrored!)
+order_B <- c(
+  "m_lm_before", "m_rf_before", "m_nn_before", "m_knn_before",
+  "m_lm_baseline",
+  "m_knn_during", "m_nn_during","m_rf_during", "m_lm_during" # inverted 
+)
+
+levels_B <- intersect(order_B, unique(by_elec_long$model))
+
+by_elec_long %>%
+  group_by(model, metric) %>%
+  summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(model = factor(model, levels = levels_B)) %>%
+  ggplot(aes(x = model, y = value, fill = model)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~ metric, scales = "free_y") +
+  labs(title = "Model performance (mean across elections)",
+       subtitle = "Order: BEFORE → baseline → DURING",
+       x = "Model", y = "Error (MAE / RMSE)") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_blank()
+    )
+
+
+```
+
+models across elections: become more predictive in general
+
+```{r}
+by_elec_long %>%
+  mutate(model = factor(model, levels = levels_A)) %>%
+  ggplot(aes(x = model, y = value, fill = model)) +
+  geom_col(width = 0.8) +
+  facet_grid(metric ~ id_elec, scales = "free_y") +
+  labs(title = "Model performance by election",
+       x = "Model", y = "Error (MAE / RMSE)") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_blank())
+```
+
+```{r}
+
+ggplot(by_elec_long, aes(x = id_elec, y = value, colour = model, group = model)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ metric, scales = "free_y") +
+  labs(title = "Model errors by election",
+       x = "Election year", 
+       y = "Error (MAE / RMSE)") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 40, hjust = 1)
+    )
+
+```
+
+#### Prediction vs vote share
+
+```{r}
+# todo: if before one colour, if during other colour
+pred_store %>% 
+  filter(id_elec == "02-1996-03-03") %>% 
+  ggplot(aes(x = pred, y = obs)) +
+  geom_point(alpha = 0.4) +
+  geom_abline(slope = 1, intercept = 0, colour = "darkblue", linewidth = 0.8) +
+  facet_wrap(~model, scales = "free") +
+  labs(
+    title = "Observed vs Predicted Vote Share",
+    x = "Predicted",
+    y = "Actual Vote Share"
+  ) +
+  theme_minimal()
+
+```
+
+### ML interpretation: partial dependence plots
+
+The partial dependence plots helps us compare whether the effects of `estimated_voting` and `debiased_estimate` are interpreted similarly or vary across model types.
+
+```{r, eval=F}
+par(mfrow = c(3, 3)) 
+library(pdp)
+
+partial(m_rf_during, pred.var = "estimated_voting", plot = TRUE, rug = TRUE, smooth = TRUE)
+partial(m_nn_during, pred.var = "estimated_voting", plot = TRUE, rug = TRUE, smooth = TRUE)
+partial(m_knn_during, pred.var = "estimated_voting", plot = TRUE, rug = TRUE, smooth = TRUE)
+
+partial(m_rf_during, pred.var = "correction_final", plot = TRUE, rug = TRUE, smooth = TRUE)
+partial(m_nn_during, pred.var = "correction_final", plot = TRUE, rug = TRUE, smooth = TRUE)
+partial(m_knn_during, pred.var = "correction_final", plot = TRUE, rug = TRUE, smooth = TRUE)
+
+partial(m_rf_before, pred.var = "debiased_estimate_final", plot = TRUE, rug = TRUE, smooth = TRUE)
+partial(m_nn_before, pred.var = "debiased_estimate_final", plot = TRUE, rug = TRUE, smooth = TRUE)
+partial(m_knn_before, pred.var = "debiased_estimate_final", plot = TRUE, rug = TRUE, smooth = TRUE)
+
+```
+
+### Best models
+
+```{r}
+best_models <- c("m_lm_during", "m_lm_before")
+
+by_elec_best <- pred_store %>%
+  filter(model %in% best_models) %>%
+  group_by(id_elec, model) %>%
+  summarise(
+    RMSE = sqrt(mean((pred - obs)^2, na.rm = TRUE)),
+    MAE  = mean(abs(pred - obs), na.rm = TRUE),
+    Rsq  = cor(pred, obs, use = "complete.obs")^2,
+    .groups = "drop"
+  )
+
+ggplot(by_elec_best, aes(x = id_elec, y = MAE, colour = model, group = model)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "MAE of selected models by election",
+       x = "Election", y = "MAE") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+```
+
+```{r}
+by_elec_best_long <- by_elec_best %>%
+  pivot_longer(cols = c(MAE, RMSE, Rsq), names_to = "metric", values_to = "value")
+
+ggplot(by_elec_best_long, aes(x = id_elec, y = value, colour = model, group = model)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ metric, scales = "free_y") +
+  labs(title = "Performance of best models by election",
+       x = "Election", y = "Error/Accuracy") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+
+
+```
+
+Overfitting: when training error is much lower than cross-validated (test) error
+
+```{r}
+# carets resampling CV scores (test)
+m_lm_before$results %>% 
+  select(RMSE, Rsquared, MAE)  
+
+# in-sample fit (train):
+train_fit <- postResample(pred = predict(m_rf_before, df_hist),
+                          obs  = df_hist$voting_results_pct)
+
+train_fit
+
+```
+
+# PREDICTION: testing the models improvement of 2023 pollsters' predictions
+
+Predict `voting_results_pct` using the same predictors as df_hist
+
+-   Compare predictions with actual 2023 results (since we do know them now).
+
+Goal: Use fitted model to adjust each poll estimate by accounting for the firm-party random effects ( the house effects) and produce bias-corrected predictions
+
+### 1. Adding the fitted values and errors:
+
+-   `pred_corrected`: what the model thinks the firm should have predicted
+-   `adj_error`: residual error after accounting for firm-party behaviour
+
+```{r}
+# predictions 
+data_2023_integration <- df_2023 %>%
+  mutate(
+    pred_lm_before = predict(m_lm_before, newdata = df_2023),
+    pred_lm_during = predict(m_lm_during, newdata = df_2023)
+  )
+
+# application of predictions safely
+data_2023_integration <- data_2023_integration %>% 
+  mutate(
+    
+    # original error 
+    error_original = estimated_voting - voting_results_pct, 
+    
+    # model predictions of the TRUE vote share
+    pred_lm_before = as.numeric(pred_lm_before),
+    pred_lm_during = as.numeric(pred_lm_during),
+    
+    # new errors 
+    error_lm_before = pred_lm_before - voting_results_pct,
+    error_lm_during = pred_lm_during - voting_results_pct, 
+
+    # residuals vs actual (model performance)
+    resid_lm_before = voting_results_pct - pred_lm_before,
+    resid_lm_during = voting_results_pct - pred_lm_during
+    
+  )
+
+# filtered version 
+complete_2023 <- data_2023_integration %>%
+  filter(!is.na(voting_results_pct))
+
+```
+
+We also save `complete_2023` for the document "****", in which we create the final visualisations for the Thesis document. 
+
+```{r}
+saveRDS(complete_2023, "./data/complete_2023_2_pct")
+```
+
+### 2. Compare before and after
+
+#### Errors by party: boxplot (before vs after)
+
+```{r,eval=F}
+
+complete_2023 %>%
+  select(abbrev_candidacies, error_original, error_lm_before, error_lm_during) %>%
+  pivot_longer(
+    c(error_original, error_lm_before, error_lm_during),
+    names_to = "type", values_to = "error"
+  ) %>%
+  mutate(type = recode(type,
+                       error_original   = "Original",
+                       error_lm_before  = "Corrected (Before)",
+                       error_lm_during  = "Corrected (During)")) %>%
+  ggplot(aes(x = fct_reorder(abbrev_candidacies, error, .fun = median, .desc = TRUE),
+             y = error, fill = type)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Estimation Errors by Party (2023)",
+    subtitle = "Original vs LM debiasing before vs during",
+    x = "Party",
+    y = "Error (Estimate − Actual, pp)",
+    fill = "Estimate type"
+  ) +
+  coord_flip() +
+  theme_minimal(base_size = 12)
+
+```
+
+#### RMSE by pollster (before vs after)
+
+alltogether:
+
+```{r,eval=F}
+# rmse
+rmse_by_firm <- complete_2023 %>%
+  group_by(polling_firm) %>%
+  summarise(
+    RMSE_original        = sqrt(mean((estimated_voting - voting_results_pct)^2, na.rm = TRUE)),
+    RMSE_corrected_before = sqrt(mean((pred_lm_before - voting_results_pct)^2, na.rm = TRUE)),
+    RMSE_corrected_during = sqrt(mean((pred_lm_during - voting_results_pct)^2, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(RMSE_original, RMSE_corrected_before, RMSE_corrected_during),
+    names_to = "type", values_to = "rmse"
+  ) %>%
+  mutate(
+    type = recode(type,
+                  RMSE_original = "Original",
+                  RMSE_corrected_before = "Corrected (Before)",
+                  RMSE_corrected_during = "Corrected (During)")
+  )
+
+# Plot
+ggplot(rmse_by_firm,
+       aes(x = fct_reorder(polling_firm, rmse), y = rmse, fill = type)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  coord_flip() +
+  scale_fill_manual(values = c("Original" = "tomato",
+                               "Corrected (Before)" = "steelblue",
+                               "Corrected (During)" = "seagreen3")) +
+  labs(
+    title = "RMSE by Pollster (Original vs Corrected, 2023)",
+    subtitle = "LM debiasing: Before vs During modelling",
+    x = "Polling Firm",
+    y = "RMSE (pp)",
+    fill = "Estimate"
+  ) +
+  theme_minimal(base_size = 12)
+
+
+
+
+```
+
+per party:
+
+```{r}
+# rmse
+rmse_by_firm_p <- complete_2023 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(
+    RMSE_original        = sqrt(mean((estimated_voting - voting_results_pct)^2, na.rm = TRUE)),
+    RMSE_corrected_before = sqrt(mean((pred_lm_before - voting_results_pct)^2, na.rm = TRUE)),
+    RMSE_corrected_during = sqrt(mean((pred_lm_during - voting_results_pct)^2, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(RMSE_original, RMSE_corrected_before, RMSE_corrected_during),
+    names_to = "type", values_to = "rmse"
+  ) %>%
+  mutate(
+    type = recode(type,
+                  RMSE_original = "Original",
+                  RMSE_corrected_before = "Corrected (Before)",
+                  RMSE_corrected_during = "Corrected (During)")
+  )
+
+# Plot
+ggplot(rmse_by_firm_p,
+       aes(x = fct_reorder(polling_firm, rmse), y = rmse, fill = type)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  coord_flip() +
+  facet_wrap(~abbrev_candidacies, scales = "free_y") + 
+  scale_fill_manual(values = c("Original" = "tomato",
+                               "Corrected (Before)" = "steelblue",
+                               "Corrected (During)" = "seagreen3")) +
+  labs(
+    title = "RMSE by Pollster (Original vs Corrected, 2023)",
+    subtitle = "LM debiasing: Before vs During modelling",
+    x = "Polling Firm",
+    y = "RMSE (pp)",
+    fill = "Estimate"
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+#### Share of pollsters where corrected MAE \< original MAE
+
+How many pollsters do we improve?
+
+```{r}
+# function for per firm mae
+delta_mae_by_firm <- function(df, pred_col, label) {
+  df %>%
+    group_by(polling_firm) %>%
+    summarise(
+      MAE_original = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),
+      MAE_corrected = mean(abs(.data[[pred_col]] - voting_results_pct), na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      delta = MAE_corrected - MAE_original,  # negative = improvement
+      improved = delta < 0,
+      type = label
+    )
+}
+
+# table
+d_before <- delta_mae_by_firm(complete_2023, "pred_lm_before", "Corrected (Before)")
+d_during <- delta_mae_by_firm(complete_2023, "pred_lm_during", "Corrected (During)")
+
+beat_pollsters_both <- bind_rows(d_before, d_during)
+
+# how many pollsters improved under each correction?
+beat_pollsters_both %>%
+  group_by(type) %>%
+  summarise(
+    n_pollsters  = n(),
+    n_improved   = sum(improved, na.rm = TRUE),
+    pct_improved = 100 * n_improved / n_pollsters,
+    .groups = "drop"
+  )
+
+# ranking
+order_by_best <- beat_pollsters_both %>%
+  group_by(polling_firm) %>%
+  summarise(best_delta = min(delta, na.rm = TRUE), .groups = "drop") %>%
+  arrange(best_delta) %>%
+  pull(polling_firm)
+
+
+
+# Plot
+ggplot(
+  beat_pollsters_both %>%
+    mutate(polling_firm = factor(polling_firm, levels = order_by_best)),
+  aes(x = polling_firm, y = delta, fill = improved)
+) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  facet_wrap(~ type) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "seagreen3", "FALSE" = "tomato"),
+                    labels = c("TRUE" = "Improved",
+                               "FALSE" = "Worse/Equal")) +
+  labs(
+    title = "Change in MAE by Pollster (Corrected − Original, 2023)",
+    subtitle = "Negative values (green) = corrected beats original",
+    x = "Polling Firm", y = "Δ MAE (pp)", fill = ""
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+#### Aggregated corrected estimates per party vs actual
+
+```{r}
+# Before
+corrected_2023_rf <- complete_2023 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(
+    avg_corrected_estimate = mean(pred_lm_before, na.rm = TRUE),
+    sd  = sd(pred_lm_before, na.rm = TRUE),
+    n_polls = n(),
+    se = sd / sqrt(n_polls),
+    ci_lower = avg_corrected_estimate - 1.96 * se,
+    ci_upper = avg_corrected_estimate + 1.96 * se,
+    .groups = "drop"
+  ) %>%
+  left_join(
+    complete_2023 %>% distinct(abbrev_candidacies, voting_results_pct),
+    by = "abbrev_candidacies"
+  ) %>%
+  group_by(polling_firm) %>%
+  mutate(polling_firm = fct_reorder(polling_firm, avg_corrected_estimate)) %>%
+  ungroup()
+
+ggplot(corrected_2023_rf,
+       aes(x = avg_corrected_estimate, y = polling_firm)) +
+  geom_pointrange(aes(xmin = ci_lower, xmax = ci_upper), colour = "steelblue") +
+  geom_vline(aes(xintercept = voting_results_pct), colour = "red", linetype = "dotted") +
+  facet_wrap(~ abbrev_candidacies, scales = "free_x") +
+  labs(
+    title = "Corrected 2023 Poll Estimates vs Actual by Party & Firm",
+    subtitle = "Corrected via LM (Before): red dotted = actual result",
+    x = "Bias-Corrected Estimate (%)",
+    y = "Polling Firm"
+  ) +
+  theme_minimal(base_size = 12)
+
+# During
+corrected_2023_during <- complete_2023 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(
+    avg_corrected_estimate = mean(pred_lm_during, na.rm = TRUE),
+    sd  = sd(pred_lm_during, na.rm = TRUE),
+    n_polls = n(),
+    se = sd / sqrt(n_polls),
+    ci_lower = avg_corrected_estimate - 1.96 * se,
+    ci_upper = avg_corrected_estimate + 1.96 * se,
+    .groups = "drop"
+  ) %>%
+  left_join(
+    complete_2023 %>% distinct(abbrev_candidacies, voting_results_pct),
+    by = "abbrev_candidacies"
+  ) %>%
+  group_by(polling_firm) %>%
+  mutate(polling_firm = fct_reorder(polling_firm, avg_corrected_estimate)) %>%
+  ungroup()
+
+ggplot(corrected_2023_during,
+       aes(x = avg_corrected_estimate, y = polling_firm)) +
+  geom_pointrange(aes(xmin = ci_lower, xmax = ci_upper), colour = "steelblue") +
+  geom_vline(aes(xintercept = voting_results_pct), colour = "red", linetype = "dotted") +
+  facet_wrap(~ abbrev_candidacies, scales = "free_x") +
+  labs(
+    title = "Corrected 2023 Poll Estimates vs Actual by Party & Firm",
+    subtitle = "Corrected via LM (During): red dotted = actual result",
+    x = "Bias-Corrected Estimate (%)",
+    y = "Polling Firm"
+  ) +
+  theme_minimal(base_size = 12)
+
+
+```
+
+#### Quantification of improvement:
+
+```{r}
+
+# Before
+
+# Overall
+overall_delta_before <- complete_2023 %>%
+  summarise(
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),
+    MAE_corr = mean(abs(pred_lm_before - voting_results_pct), na.rm = TRUE),
+    RMSE_raw = sqrt(mean((estimated_voting - voting_results_pct)^2, na.rm = TRUE)),
+    RMSE_corr = sqrt(mean((pred_lm_before - voting_results_pct)^2, na.rm = TRUE))
+  ) %>%
+  mutate(
+    dMAE = MAE_corr - MAE_raw,
+    dRMSE = RMSE_corr - RMSE_raw
+  )
+overall_delta_before
+
+# By party
+by_party_before <- complete_2023 %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),
+    MAE_corr = mean(abs(pred_lm_before - voting_results_pct), na.rm = TRUE),
+    RMSE_raw = sqrt(mean((estimated_voting - voting_results_pct)^2, na.rm = TRUE)),
+    RMSE_corr = sqrt(mean((pred_lm_before - voting_results_pct)^2, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(dMAE = MAE_corr - MAE_raw,
+         dRMSE = RMSE_corr - RMSE_raw) %>%
+  arrange(dMAE)
+
+by_party_before
+
+# Before
+
+# Overall
+overall_delta_during <- complete_2023 %>%
+  summarise(
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),
+    MAE_corr = mean(abs(pred_lm_during - voting_results_pct), na.rm = TRUE),
+    RMSE_raw = sqrt(mean((estimated_voting - voting_results_pct)^2, na.rm = TRUE)),
+    RMSE_corr = sqrt(mean((pred_lm_during - voting_results_pct)^2, na.rm = TRUE))
+  ) %>%
+  mutate(
+    dMAE = MAE_corr - MAE_raw,
+    dRMSE = RMSE_corr - RMSE_raw
+  )
+overall_delta_during
+
+# By party
+by_party_during <- complete_2023 %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),
+    MAE_corr = mean(abs(pred_lm_during - voting_results_pct), na.rm = TRUE),
+    RMSE_raw = sqrt(mean((estimated_voting - voting_results_pct)^2, na.rm = TRUE)),
+    RMSE_corr = sqrt(mean((pred_lm_during - voting_results_pct)^2, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(dMAE = MAE_corr - MAE_raw,
+         dRMSE = RMSE_corr - RMSE_raw) %>%
+  arrange(dMAE)
+
+by_party_during
+
+
+```

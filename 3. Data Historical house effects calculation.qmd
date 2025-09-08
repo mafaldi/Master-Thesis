@@ -1,0 +1,631 @@
+---
+title: "3. Data Historical house effects calculation"
+author: "Mafalda González González"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+```{r global_options, include=T, echo = F}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, eval=T)
+options(scipen = 999)
+```
+
+
+# library
+
+```{r}
+
+rm(list = ls())
+
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(lubridate)
+library(stringr)
+library(readr)
+
+
+library(DataExplorer) # EDA 
+library(skimr) 
+library(ggalluvial)
+library(data.table) 
+library(lubridate)
+library(zoo)
+
+library(PerformanceAnalytics) # descriptive modeling
+library(corrplot)
+
+library(broom) # lm
+library(lme4)
+library(broom.mixed)
+
+library(forcats) # cross validation
+library(caret)
+
+
+
+# party palette 
+party_colors <- c("PP" = "#1db4e8",
+      "PSOE" = "#c30505",
+      "SUMAR" = "#e71853",
+      "PODEMOS" = "#a444b4",
+      "VOX" = "#83b431",
+      "ERC" = "#ffbf41",
+      "ERC-CATSI" = "#ffbf41",
+      "CIU" = "#1b348a",
+      "CDC" = "#1b348a",
+      "DIL" = "#1b348a",
+      "MP" = "#004938",
+      "CS" = "#eb6109",
+      "PNV" = "darkgreen",
+      "BNG" = "lightblue",
+      "EH-BILDU" = "lightgreen",
+      "JXCAT-JUNTS" = "#03cfb4",
+      "CC" = "#2f6da6",
+      "UPN" = "#e72c2e",
+      "NC-BC" = "#81c03b",
+      "UPL" = "#b71966",
+      "EXISTE" = "#227e57",
+      "CUP" = "#fff201",
+      "ECP" = "#a444b4", 
+      "ENMAREA" = "#a444b4",
+      "COMPROMIS" = "#d95827",
+      "IU" = "#a9272f", 
+      "UPYD" = "#e5007d",
+      "AMAIUR" = "#0198b3",
+      "ERPV" = "#ffbf41",
+      "PSA-PA" = "#19a24a",
+      "CDS" = "#b2c544",
+      "AP-PDP-PL" = "#ffa518",
+      "UCD" = "#1a7e36",
+      "PCE" = "#961425",
+      "HB" = "#613000"
+    )
+
+```
+
+# Data
+
+We load the data we have prepared in "**1. Datasets creation and feature engineering**". 
+
+```{r}
+data_2023 <- readRDS("./data/data_2023.rds")
+data_hist <- readRDS("./data/data_hist.rds")
+```
+
+
+# House effects calculation for historical data
+
+> Purpose: create the same variables as in `data_2023` in order so that the models can train and predict.
+
+**SUMMARY**: Estimate and document systematic firm x party biases using the full historical dataset, construct a consensus benchmark weighted by pollster quality and poll recency, and generate debiased estimates to serve as stable inputs for predictive models.
+
+**Disclaimer**: we recompute several formulas already computed earlier with the aim of making it easier to follow the logistical track within the historical house effects computation and keep its logic self-contained in this section.
+
+**Design choice**: we do not want pollsters that are not going to appear in the 2023 elections, as their input would skew the consensus, and therefore also the consensus correction and the debiased estimates.
+
+## Theory: correction design
+
+1.  **Historical house effect (firm x party)**: we define *prediction error* within each past election (`id_elect`) as `error = estimated_voting - voting_results_pct`. We average the `error` by polling_firm x abbrev_candidacy to estimate *pollster-party specific biases (house effects)* as `error_avg = mean(error)`, capturing overestimation (positive bias) or underestimation (negative bias).
+
+2.  **Pollster ranking** on past performance: using the prediction errors of the historical data we calculate each firms `MAE = mean(abs(error))` and `RMSE = sqrt(mean((error)^2)` (how much each pollsters predictions usually deviate from the correct estimation). These will serve as quality weights: firms with lower past error receive more weight.
+
+3.  **Weights computations (recency x quality)**: we define the recency weight as `recency_weight = 1/(1+days_to_election)` and combine it with the quality weights `MAE_pollster_rating_weight = 1/(1+MAE)` or `RMSE_pollster_rating_weight = 1/(1+RMSE)`. These weights are inverse transformation as we want to give more importance to those who have lower MAE/RMSE or less days to election. We combined the weights with `combined_weight_MAE = recency_weight * MAE_pollster_rating_weight`or `combined_weight_RMSE = recency_weight * RMSE_pollster_rating_weight`.
+
+-   Why inverse form `1/(1+x)` It is bounded in \[0,1\], monotone, avoids division by zero, and gently down-weights stale/low-quality polls without hard cut-offs.
+
+4.  **Benchmark house effects (firm x party)**: we weight each poll's estimates per election to compute a *weighted consensus (benchmark)* of estimates at the party level per election. This means that based on the performance of pollsters (MAE or RMSE), we give each of their polls more or less weight in the calculation of an average of the estimates, which can be understood as creating "imaginary" results (= the weighted average poll estimates) for each of the elections. This is done through `weighted_results_MAE_rating  = weighted.mean(estimated_voting, combined_weight_MAE)` and `weighted_results_RMSE_rating = weighted.mean(estimated_voting, combined_weight_RMSE)`.
+
+5.  **Debiasing**:
+
+    5.1 we measure the deviation of each poll's estimates from the weighted consensus (benchmark) of its election, with `error_MAE_rating = estimated_voting - weighted_results_MAE_rating` or `error_RMSE_rating = estimated_voting - weighted_results_RMSE_rating`. Averaging by firm x party produces the *benchmark house effect* (`error_avg_MAE_rating = mean(error_MAE_rating)` or `error_avg_RMSE_rating = mean(error_RMSE_rating)`).
+
+    5.2 we debias the raw poll estimates by the benchmark house effects, generating corrected estimates for how a pollster deviates from the consensus (benchmark) in three variants:
+
+    -   Regular (historical) correction: `debiased_estimate_avg = estimated_voting − error_avg`
+
+        -   `error_avg` is the direct deviation of poll estimates by firm x party to the actual results, i.e. the simple house effects of each pollster
+
+    -   Benchmark MAE correction: `debiased_estimate_MAE_rating = estimated_voting − error_avg_MAE_rating`
+
+        -   error_avg_MAE_rating is the deviation of poll estimates by firm x party to the weighted benchmark consensus, which itself is built using weights based on the MAE of pollsters past performance
+
+    -   Benchmark RMSE correction: `debiased_estimate_RMSE_rating = estimated_voting − error_avg_RMSE_rating`
+
+        -   error_avg_RMSE_rating is the deviation of poll estimates by firm x party to the weighted benchmark consensus, which itself is built using weights based on the RMSE of pollsters past performance
+
+    5.3 Discussion about benchmark decisions
+
+6.  **Evaluation**: comparing MAE / RMSE of (i) raw estimates, (ii) regular (historical) corrections of estimates, and (iii) consensus (benchmark) corrections of estimates, against actual the actual true election results per election.
+
+7.  **Discussion**: we discuss the best estimate to choose.
+
+## 1. Historical prediction errors + historical house effects (firm x party)
+
+We check missingness, compute poll-level errors vs. truth and aggregate to firm-party average error with uncertainty indicators (sd/se/CI)
+
+check data:
+
+```{r}
+data_hist %>%
+  summarise(
+    n = n(),
+    na_results = sum(is.na(voting_results_pct)), 
+    na_est = sum(is.na(estimated_voting)), 
+    na_id_survey = sum(is.na(id_survey))
+  ) # left with n = 13422
+```
+
+calculating error and error_avg
+
+```{r}
+# error per poll 
+data_hist <- data_hist %>% 
+  mutate(error = estimated_voting - voting_results_pct)
+
+# avg error per pollster x party 
+house_effects_hist <- data_hist %>% 
+  group_by(polling_firm, abbrev_candidacies) %>% 
+  summarise(
+    error_avg = mean(error, na.rm = TRUE), 
+    sd_error_avg = sd(error, na.rm = TRUE),
+    n_polls_avg = sum(!is.na(error)),  # how many polls by pollster for each party 
+    se_avg = sd_error_avg / sqrt(n_polls_avg),
+    ci_lower_avg = error_avg - 1.96 * se_avg,
+    ci_upper_avg = error_avg + 1.96 * se_avg, 
+    .groups = "drop"
+  )
+
+tail(house_effects_hist)
+```
+
+## 2. Pollster rating on past performance (MAE/RMSE)
+
+We compute the average errors (MAE/RMSE) of the historical performance of polling firms.
+
+```{r}
+# historical errors MAE/RMSE 
+MAE_RMSE_hist <- data_hist %>%  
+  group_by(polling_firm) %>% 
+  summarise(
+    MAE = mean(abs(error), na.rm = TRUE), 
+    RMSE = sqrt(mean((error)^2, na.rm = TRUE)),
+    n_obs = sum(!is.na(error)), 
+    n_missing = sum(is.na(error)), 
+    .groups = "drop"
+  ) 
+
+MAE_RMSE_hist
+
+```
+
+## 3. Weights computations
+
+We attach per-firm MAE/RMSE to each poll, compute days-to-election from fieldwork, then build the combined weights used for the benchmark
+
+Weights:
+
+```{r}
+# weights: MAE/RMSE -----------------------------
+data_hist_consensus <- data_hist %>% 
+  left_join(MAE_RMSE_hist, by = "polling_firm") 
+
+
+# weight: days to election ----------------------
+election_days <- data_hist_consensus %>%
+  distinct(id_elec) %>%
+  mutate(election_day = as.Date(sub("^02-", "", id_elec)))
+
+data_hist_consensus <- data_hist_consensus %>%
+  left_join(election_days 
+            %>% select(id_elec, election_day),
+            by = "id_elec") %>%
+  mutate(
+    mid_date = as.Date(fieldwork_start) + n_field_days/2,
+    days_to_election = as.numeric(difftime(election_day, mid_date, units = "days"))
+  )
+
+```
+
+We define weights as inverse MAE and inverse days to election! As inverse relationship down weights higher values:
+
+-   when x is small (close to election, low error) =\> 1/(1+0) = 1 =\> weight comes close to 1, and hence will be further factored in
+-   when x is big (further from election, higher error) =\> 1/(1+9) = 0.1 =\> weight shrinks towards 0, and will have less importance
+-   FORMULA: avoids division by zero and keeps all weight finite and bounded between 0 and 1. Thus, it provides a smooth diminishing effect without a hard cutoff
+-   THEORY: It reflects how older polls are less relevant and how less accurate pollsters are treated as less trustworthy
+
+```{r}
+# combined weights (inverse MAE x inverse days)
+data_hist_consensus <- data_hist_consensus %>% 
+  mutate(
+    recency_weight = 1 / (1 + pmax(days_to_election, 0)), # clamps negatives to 0 if any  
+    MAE_pollster_rating_weight = 1 / (1 + MAE), # accuracy per pollster = ranking 
+    RMSE_pollster_rating_weight = 1 / (1 + RMSE), 
+    combined_weight_MAE = recency_weight * MAE_pollster_rating_weight, 
+    combined_weight_RMSE = recency_weight * RMSE_pollster_rating_weight
+  )
+
+```
+
+## 4. Benchmark house effects (firm x party)
+
+For each election and party, we compute two consensus benchmarks: MAE-weighted and RMSE-weighted.
+
+```{r}
+results_consensus_hist <- data_hist_consensus %>%
+  group_by(id_elec, abbrev_candidacies) %>%
+  
+  # resultados imaginarios = ponderamos el resultado de cada encuesta en funcion de nuestros weights 
+  summarise(
+    weighted_results_MAE_rating  = weighted.mean(estimated_voting, combined_weight_MAE, na.rm = TRUE),
+    weighted_results_RMSE_rating = weighted.mean(estimated_voting, combined_weight_RMSE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+head(results_consensus_hist)
+
+data_hist_consensus <- data_hist_consensus %>%
+  left_join(results_consensus_hist, by = c("id_elec", "abbrev_candidacies"))
+
+```
+
+## 5. Debiasing current election polls:
+
+5.1 We compute each poll’s deviation from the benchmark and then average by firm-party, yielding consensus-anchored house effects.
+
+5.2 Then we apply three alternative corrections (truth-anchored average, MAE-benchmark, RMSE-benchmark) to produce corrected estimates per poll.
+
+### 5.1 RECALCULATE house effects with the consensus (the weighted results, not the true results):
+
+```{r}
+# deviation from consensus 
+data_hist_consensus <- data_hist_consensus %>%
+  mutate(
+    error_MAE_rating = estimated_voting - weighted_results_MAE_rating, 
+    error_RMSE_rating = estimated_voting - weighted_results_RMSE_rating
+    )
+
+# recalculating house effects (avg deviation per pollster x party from the benchmark house effects results (the imaginary results))
+house_effects_consensus_hist <- data_hist_consensus %>%
+  group_by(polling_firm, abbrev_candidacies) %>% 
+  summarise(
+    # MAE
+    error_avg_MAE_rating = mean(error_MAE_rating,  na.rm = TRUE), 
+    sd_error_MAE_rating = sd(error_MAE_rating,  na.rm = TRUE),
+    n_polls_MAE_rating = n(), 
+    se_MAE_rating = sd_error_MAE_rating / sqrt(n_polls_MAE_rating),
+    ci_lower_MAE = error_avg_MAE_rating - 1.96 * se_MAE_rating,
+    ci_upper_MAE_rating = error_avg_MAE_rating + 1.96 * se_MAE_rating,
+    
+    #RMSE 
+    error_avg_RMSE_rating = mean(error_RMSE_rating,  na.rm = TRUE), 
+    sd_error_RMSE_rating = sd(error_RMSE_rating,  na.rm = TRUE),
+    n_polls_RMSE_rating = n(), 
+    se_RMSE_rating = sd_error_RMSE_rating/ sqrt(n_polls_RMSE_rating),
+    ci_lower_RMSE_rating = error_avg_RMSE_rating - 1.96 * se_RMSE_rating,
+    ci_upper_RMSE_rating = error_avg_RMSE_rating + 1.96 * se_RMSE_rating, 
+    
+    .groups = "drop"
+    ) 
+
+head(house_effects_consensus_hist)
+```
+
+Difference between the datasets: 
+
+- `results_consensus_hist`: the weighted consensus vote share per party per election (historical)
+- `house_effects_consensus_hist`: how each pollster typically deviated from that consensus across all history
+
+Now we join the correction types into the the historical benchmark dataset: 
+
+- historical regular correction (using past `error_avg`)
+- benchmark correction (using `error_avg_MAE_rating` / `error_avg_RMSE_rating`)
+
+```{r}
+
+data_hist_consensus <- data_hist_consensus %>%
+  left_join(house_effects_hist, 
+            by = c("polling_firm","abbrev_candidacies")) %>%
+  left_join(house_effects_consensus_hist, 
+            by = c("polling_firm","abbrev_candidacies"))
+
+
+head(data_hist_consensus)
+
+```
+
+### 5.2 DEBIASED PREDICTIONS
+
+Pollster-party-specific corrections, so they should reflect how each polling firm deviates from the benchmark for each party
+
+-   we do not need to group by pollster and party as we did it already when calculating the error_avg\_\*
+
+```{r}
+# debiased estimates 
+data_hist_consensus <- data_hist_consensus %>%  
+  mutate(
+    debiased_estimate_avg = estimated_voting - error_avg, 
+    debiased_estimate_MAE_rating = estimated_voting - error_avg_MAE_rating, 
+    debiased_estimate_RMSE_rating = estimated_voting - error_avg_RMSE_rating
+    )
+
+# insanity check: 
+data_hist_consensus %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    n = n(),
+    firms = n_distinct(polling_firm),
+    na_results = sum(is.na(voting_results_pct)), 
+    na_est = sum(is.na(estimated_voting)), 
+    na_id_survey = sum(is.na(id_survey)), 
+    na_error_avg = sum(is.na(error_avg)), 
+    na_deb_est_avg = sum(is.na(debiased_estimate_avg)),
+    prop_na_deb_est_avg = mean(is.na(debiased_estimate_avg)), 
+    prop_mis_hist_avg = mean(is.na(error_avg)),
+    na_MAE = sum(is.na(error_MAE_rating)), 
+    na_deb_est_MAE = sum(is.na(debiased_estimate_MAE_rating)),
+    prop_na_deb_est_MAE = mean(is.na(debiased_estimate_MAE_rating)), 
+    prop_mis_hist_MAE = mean(is.na(error_MAE_rating)),
+    na_RMSE = sum(is.na(error_RMSE_rating)), 
+    na_deb_est_RMSE = sum(is.na(debiased_estimate_RMSE_rating)),
+    prop_na_deb_est_RMSE = mean(is.na(debiased_estimate_RMSE_rating)), 
+    prop_mis_hist_RMSE = mean(is.na(error_RMSE_rating))
+  )
+
+data_hist_consensus %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    n = n(),
+    real_mean = mean(voting_results_pct), 
+    raw_mean = mean(estimated_voting),
+    hist_mean = mean(debiased_estimate_avg),
+    bMAE_mean = mean(debiased_estimate_MAE_rating),
+    bRMSE_mean = mean(debiased_estimate_RMSE_rating),
+    .groups = "drop"
+  )
+
+```
+
+### 5.3 Discussion about benchmark decisions
+
+Let us look at the debiased estimates. They are calculated as the `estimated_voting` minus:
+
+-   Average correction (“hist”): error_avg = mean(estimated_voting − voting_results_pct) = direct deviation of each firm x party from the actual result
+
+-   Benchmark corrections (bMAE / bRMSE):
+
+    -   error_avg_MAE_rating = mean(estimated_voting − weighted_results_MAE) = deviation of poll estimates by firm x party to the weighted benchmark consensus, which itself is built using weights based on the MAE of pollsters past performance
+    -   error_avg_RMSE_rating = mean(estimated_voting − weighted_results_RMSE) = deviation of poll estimates by firm x party to the weighted benchmark consensus, which itself is built using weights based on the RMSE of pollsters past performance
+
+So for the first correction, we are calculating the difference between the estimated voting and the avg_error per firm-party of the true results; but for the benchmark corrections we are calculating the different between the estimated voting and the avg error per firm-party to the "imaginary" results (consensus benchmark).
+
+Hence, what if we would construct a consensus benchmark using average past errors (rather than MAE or RMSE weights) and then define a correction relative to that?
+
+It would make the framework parallel more consistent, with the construction of "Benchmark AVG" as `error_avg_AVG_rating = mean(estimated_voting − weighted_results_AVG)`, where `weighted_results_AVG` is just past pollsters' average-error weighted consensus. We would then have
+
+-   Hist avg (truth-based),
+-   Benchmark avg (consensus based, but with simple averaging),
+-   Benchmark MAE,
+-   Benchmark RMSE.
+
+***Yet, there is a conceptual mistake here***! The reason we do not build “benchmark-AVG” is that it collapses into the simple mean of all polls (i.e. a naïve average), which can be highly biased if the majority of firms lean in the same direction. We note in our literature review: "Still, pooling only improves precision if the pollster err in different directions, as if not they may for example create overstated leads (Graefe, 2021); or if polls are unbiased, as naïve pooling polls with the same bias can yield more confident but still systematically distorted estimates (Jackman, 2005)." That is why the benchmark step usually brings in performance weighting (MAE / RMSE, recency, etc.), as it is meant to improve on the simple average.
+
+## 6. Evaluation: comparison against actual 2023 vote shares
+
+We aggregate MAE/RMSE of raw vs. corrected estimates (by party) against the actual results, and plot party-level comparisons and benchmark vs. actual.
+
+MAE and RMSE of predictions against actual current vote share: 
+
+```{r}
+comparison_hist <- data_hist_consensus %>% 
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    # MAE
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct)),
+    MAE_avg = mean(abs(debiased_estimate_avg - voting_results_pct)),
+    MAE_bMAE = mean(abs(debiased_estimate_MAE_rating - voting_results_pct)),
+    MAE_bRMSE = mean(abs(debiased_estimate_RMSE_rating - voting_results_pct)),
+
+    # RMSE
+    RMSE_raw = sqrt(mean((estimated_voting - voting_results_pct)^2)),
+    RMSE_avg = sqrt(mean((debiased_estimate_avg - voting_results_pct)^2)),
+    RMSE_bMAE = sqrt(mean((debiased_estimate_MAE_rating - voting_results_pct)^2)),
+    RMSE_bRMSE = sqrt(mean((debiased_estimate_RMSE_rating - voting_results_pct)^2)),
+
+    .groups = "drop"
+  )
+  
+comparison_hist
+
+comparison_hist_long <- comparison_hist %>% 
+  pivot_longer(
+    cols = -abbrev_candidacies,
+    names_to = c("metric", "method"),
+    names_sep = "_",
+    values_to = "value"
+  )
+
+comparison_hist_long$method <- factor(
+  comparison_hist_long$method, 
+  levels = c("raw", "avg", "bMAE", "bRMSE"))
+
+# levels(comparison_hist_long$method) # check
+
+# quick summary 
+comparison_hist_long %>% 
+  group_by(metric, method) %>% 
+  summarise(
+    mean_value = mean(value, na.rm = TRUE), 
+    median_value = median(value, na.rm = TRUE), 
+    .groups = "drop") %>%
+  arrange(metric, mean_value)
+
+```
+
+```{r}
+# Plot MAE by party 
+ggplot(comparison_hist_long %>% filter(metric == "MAE"), 
+       aes(x = abbrev_candidacies, y = value, fill = method)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c(
+    "raw" = "gold1",
+    "avg" = "orangered",
+    "bMAE" = "darkseagreen3",
+    "bRMSE" = "darkcyan" 
+  ), labels = c(
+    "Raw Estimate", "Regular Correction (Average)", "Benchmark (MAE)", "Benchmark (RMSE)"
+  )) +
+  labs(
+    title = "MAE of Predictions (Raw vs Corrected) \nby Party",
+    x = "Party",
+    y = "Mean Absolute Error",
+    fill = "Correction Method"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 40, hjust = 1))
+
+```
+
+
+## 7. Discussion
+
+
+So, now comes the question which "correction" to choose. It would seem apparent to choose the correction based on the avg house effects per firm-party based on the actual errors, as it is the one that gives us the best corrected estimates.
+
+But why is it being the best and so much better than the others?
+
+This is because as we are using a historical dataset we know the outcomes for every past election, so a simple average, as it is anchored to the truth (real results), organically minimises variance and performs best retrospectively.
+
+Let us look once again at the corrections:
+
+-   Average correction (“hist”): error_avg = mean(estimated_voting − voting_results_pct) = direct deviation of each firm x party from the actual result
+
+-   Benchmark corrections (bMAE / bRMSE):
+
+    -   error_avg_MAE_rating = mean(estimated_voting − weighted_results_MAE) = deviation of poll estimates by firm x party to the weighted benchmark consensus, which itself is built using weights based on the MAE of pollsters past performance
+    -   error_avg_RMSE_rating = mean(estimated_voting − weighted_results_RMSE) = deviation of poll estimates by firm x party to the weighted benchmark consensus, which itself is built using weights based on the RMSE of pollsters past performance
+
+The asymmetry here is apparent: for the average correction, we are anchoring to the true results; but for the benchmark corrections, we are anchoring to a constructed consensus benchmark.
+
+So indeed, we are comparing apples to oranges: one set of corrections is “real-anchored” (truth), the others are “consensus-anchored” (imaginary estimates). The design of the corrections answers actually two questions:
+
+-   Hist avg correction is about “how has this firm performed vs. reality in the past?”
+-   Benchmark corrections are about “how does this firm perform vs. the consensus of all firms, weighted by reliability?”
+
+They are answering slightly different questions, which is why they their corrections are so differently performing.
+
+Hence, **should we choose the simple averages of house effects as our best correction strategy**?
+
+The short answer: No.
+
+The longer answer:
+
+The logic of the average corrections based on general house effects is fully reasonable to take a look at how much house effects impact the estimates of poll houses. However, our goal here is not only to understand house effects (descriptive), but to use them in a predictive manner. Hence, we must learn to make better estimates without relying on the luxury of true results, as we will not have them for any upcoming elections until that election is done. So the average house effects per firm-party is not actually a "fair" correction method for prediction, as it requires knowing the outcome.
+
+What we want to do is to train the models on making better estimates based on the history of the pollsters and their proneness to over- and under-correction (their historical house effects). Hence, we will utilize the MAE benchmark debiased estimates and its corrections to train the models, in order to prepare them for the real case scenario, our 2023 election.
+
+As benchmark corrections (bMAE / bRMSE) are anchored in consensus estimates, and not the truth, they effectively simulate the "before election" situation where only polls are available, not the real outcome. This makes them the appropriate basis for predictive modelling: they force the model to generalise from established pollster behaviour without access to true results. Otherwise, the models would be "cheating" by training on truth-anchored corrections, achieving retrospective accuracy but offering little predictive validity.
+
+**In short: For prediction we rely on benchmark-MAE corrections, as they mimic the pre-election setting without access to true results.**
+
+# EDA house effects historical
+
+-   bar height = actual election result per party
+-   points = individual avg polling firm estimates
+-   horizontal line = avg estimated voting in total
+
+```{r}
+# avg estimate and actual result
+party_summary <- data_hist %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    avg_poll = mean(estimated_voting),
+    avg_poll_label = paste0(round(avg_poll, 1), "%"),
+    actual_result = mean(voting_results_pct),
+    actual_label = paste0(round(actual_result, 1), "%"),
+    .groups = "drop"
+  )
+
+# more space between bars
+party_summary <- party_summary %>%
+  mutate(x_position = as.numeric(as.factor(abbrev_candidacies)) * 1.5) 
+
+data_hist_x <- data_hist %>%
+  mutate(x_position = as.numeric(as.factor(abbrev_candidacies)) * 1.5)
+
+
+ggplot() +
+  
+  # bar: actual results
+  geom_col(data = party_summary,
+           aes(x = x_position, y = actual_result, fill = abbrev_candidacies),
+           width = 0.6, 
+           alpha = 0.5) + 
+  
+  geom_text(data = party_summary,
+          aes(x = x_position, y = -1, label = actual_label, colour = abbrev_candidacies), fontface = "bold", size = 3) +
+
+  # points: individual poll estimates
+  geom_jitter(data = data_hist_x,
+              aes(x = x_position, y = estimated_voting, colour = abbrev_candidacies),
+              width = 0.2, size = 0.7) +
+
+  # segments line: avg estimated vote share total
+  geom_segment(data = party_summary,
+               aes(x = x_position, 
+                 xend = x_position + 0.8,
+                 y = avg_poll, yend = avg_poll),
+               colour = "black", linewidth = 0.8) +
+
+  geom_text(data = party_summary,
+            aes(x = x_position + 1.1, 
+                y = avg_poll, 
+                label = avg_poll_label),
+            colour = "black", 
+            fontface = "bold", 
+            size = 3,
+            hjust = 1, # aligns to the right
+            vjust = -0.4) + # sits on top of the line
+  
+  # custom spacing 
+  scale_x_continuous(
+    breaks = party_summary$x_position,
+    labels = party_summary$abbrev_candidacies
+  ) +
+  
+  scale_fill_manual(values = party_colors) +
+  scale_colour_manual(values = party_colors) +
+
+  labs(
+    title = paste("Comparison of Total Poll Averages, Pollster Estimates, and Actual Results", data_2023$year),
+    x = "Party",
+    y = "Vote Share (%)",
+    fill = "Party",
+    colour = "Party"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 40, hjust = 1),
+    panel.grid.major.x = element_blank(), 
+    panel.grid.minor.x = element_blank(), 
+    legend.position="none"
+    )
+
+```
+
+
+
+# Saving data for downstream usage 
+
+We continue our analysis in the document "**4. Modeling: improvement of 2023 pollsters predictions**".
+
+```{r}
+saveRDS(data_hist_consensus, "./data/data_hist_consensus.rds")
+```
+

@@ -1,0 +1,453 @@
+---
+title: "1. Data extraction and engineerning"
+author: "Mafalda González González"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+```{r global_options, include=T, echo = F}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, eval=T)
+options(scipen = 999)
+```
+
+# library
+
+```{r, message=F}
+
+rm(list = ls())
+
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(lubridate)
+library(stringr)
+library(readr)
+library(DataExplorer)
+```
+
+# Datasets creation
+
+## Summary of elections results
+
+Manual creation of the summary of all election results. The results of this data creation are saved and ready for loading in the file "data". Feel free to try out the data creation process, or go directly to the end of this section to load the prepared file.
+
+```{r, eval=F}
+# install.packages("pollspain")
+library(pollspain)
+
+e2023 <- summary_election_data("congress", year = 2023) # default at the national level
+e2019a<- summary_election_data("congress", year = 2019) # press: 1
+e2019n<- summary_election_data("congress", year = 2019) # press: 2
+e2016 <- summary_election_data("congress", year = 2016)
+e2015 <- summary_election_data("congress", year = 2015)
+e2011 <- summary_election_data("congress", year = 2011)
+e2008 <- summary_election_data("congress", year = 2008)
+e2004 <- summary_election_data("congress", year = 2004)
+e2000 <- summary_election_data("congress", year = 2000)
+e1996 <- summary_election_data("congress", year = 1996)
+e1993 <- summary_election_data("congress", year = 1993)
+e1989 <- summary_election_data("congress", year = 1989)
+e1986 <- summary_election_data("congress", year = 1986)
+e1982 <- summary_election_data("congress", year = 1982)
+
+get_election_results <- function(df, year) {
+  df %>%
+    mutate(
+      year = as.numeric(year)
+    ) %>%
+    select(year, id_elec, id_candidacies, abbrev_candidacies, name_candidacies, porc_candidacies_valid)
+}
+
+
+elections <- list(
+  "1982" = e1982,
+  "1986" = e1986,
+  "1989" = e1989,
+  "1993" = e1993,
+  "1996" = e1996,
+  "2000" = e2000,
+  "2004" = e2004,
+  "2008" = e2008,
+  "2011" = e2011,
+  "2015" = e2015,
+  "2016" = e2016,
+  "2019" = e2019a,
+  "2019" = e2019n,
+  "2023" = e2023
+)
+
+all_elections_results <- imap_dfr(elections, get_election_results)
+
+head(all_elections_results)
+```
+
+Prepared file:
+
+```{r}
+all_elections_results <- read_rds("./data/all_elections_results.rds")
+```
+
+## Summary of surveys
+
+```{r}
+load("./data/historical_surveys.rda")
+ls()
+head(historical_surveys)
+names(historical_surveys)
+```
+
+## Joining of datasets & renaming target variable
+
+```{r}
+survey_elections <- historical_surveys %>%
+  left_join(all_elections_results 
+            %>% rename(
+              voting_results_pct = porc_candidacies_valid),
+            by = c("id_elec", "abbrev_candidacies"))
+
+
+head(survey_elections)
+```
+
+# Feature engineering
+
+## `party_age`
+
+Constitutes the first year each party appeared and then calculate party age depending on the year of the election.
+
+```{r}
+party_first_year <- all_elections_results %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    first_year = min(year), .groups = "drop"
+    ) 
+
+survey_elections <- survey_elections %>%
+  left_join(party_first_year, by = "abbrev_candidacies") %>%
+  mutate(
+    party_age = year - first_year
+    )
+
+head(survey_elections, n=10)
+```
+
+## `party_elec_count`
+
+Previous appearences at the general elections as a party.
+
+```{r}
+party_election_counts <- all_elections_results %>%
+  distinct(abbrev_candidacies, year) %>% 
+  arrange(abbrev_candidacies, year) %>%
+  group_by(abbrev_candidacies) %>%
+  mutate(
+    party_elec_count = row_number() - 1 
+    )
+
+survey_elections <- survey_elections %>%
+  left_join(party_election_counts, by = c("abbrev_candidacies", "year"))
+
+head(survey_elections, n=10)
+```
+
+## `first_time`
+
+A binary variable representing it is the party's first time at the general elections.
+
+```{r}
+survey_elections <- survey_elections %>%
+  mutate(
+    first_time = as.integer(party_elec_count == 0)
+    )
+
+head(survey_elections, n=10)
+```
+
+```{r}
+# check 
+survey_elections %>%
+  select(abbrev_candidacies, year, party_age, party_elec_count, first_time) %>%
+  distinct() %>%
+  arrange(abbrev_candidacies, year) %>%
+  head(20)
+
+head(survey_elections)
+
+```
+
+# Preprocessing data
+
+If you want to skip the previous steps, feel free to load the elections and surveys information directly by loading this chunk (with eval=F, it will not load by default):
+
+```{r, eval=F}
+survey_elections <- readRDS("./data/survey_elections.rds")
+```
+
+## Years fragmentation
+
+We separate the general dataset `survey_elections` per year that we get two distinct datasets: data_2023, which represents the data for 2023, and data_hist, which has the polling and election information for all previous years. This is easily done by using the variable `id_elec`.
+
+```{r}
+data_2023 <- survey_elections %>% 
+  filter(id_elec == "02-2023-07-24")
+
+data_hist <- survey_elections %>% 
+  filter(id_elec != "02-2023-07-24")
+
+count(survey_elections)
+count(data_2023)
+count(data_hist)
+```
+
+In total, we have 29287 observations. `data_2023` encompasses 11210 observations, and `data_hist`: 18077
+
+## Data reduction
+
+We reduce the datasets:
+
+1.  Deleting missing cases of `voting_results_pct` - there are polls of parties that did not have any vote share at all, or that it was not recorded. Either way, with `voting_results_pct` as our target variable, missing cases need to be deleted.
+
+2.  Excluding parties without a minimum vote share percentage =\> we filter out by vote count, where parties (`abbrev_candidacies`) has to have a minimum % of vote share to be included.
+
+-   5% of vote share would represent the actual parliament cut-off, and hence we would miss in the prediction those parties that had the possibility of being included but nearly missed it. They are important and interesting for prediction and also for house effect estimation.
+-   The other option would have been manual selection: but that would mean arbitrary handling of parties and not being able to fully loop this process, as we would have to individually pick out the parties to keep for each general election before proceeding with the rest of the analysis.
+
+3.  Excluding pollsters from `data_hist` that do not appear in `data_2023`
+
+-   Further below we will calculate pollsters accuracy in past elections (`data_hist`), and based on their performance we will give them more or less weight in calculating an average of all the pollsters predictions for the elections of 2023. However, if we do that with pollsters that appear in one dataset but not the other, we are inherently introducing historical bias of predictions of pollsters that do not exist anymore in the current predictions.
+
+### Deleting missing cases on voting_results_pct:
+
+```{r}
+# 2023
+profile_missing(data_2023)
+
+data_2023 <- data_2023 %>% 
+  filter(!is.na(voting_results_pct))
+
+profile_missing(data_2023)
+count(data_2023)
+
+# historical
+profile_missing(data_hist) 
+
+data_hist <- data_hist %>% 
+  filter(!is.na(voting_results_pct))
+
+profile_missing(data_hist)
+count(data_hist)
+```
+
+`data_2023`:
+
+-   missing `voting_results_pct`: 3516
+-   reduced to: 7694
+
+`data_hist`:
+
+-   missing `voting_results_pct`: 1777
+-   reduced to: 16300
+
+### Excluding parties based on min. vote share:
+
+```{r}
+data_2023 %>% 
+  arrange(desc(voting_results_pct)) %>% 
+  distinct(abbrev_candidacies)
+
+data_hist %>%
+  group_by(id_elec) %>%
+  arrange(desc(voting_results_pct), .by_group = TRUE) %>%
+  summarise(
+    parties_in = unique(abbrev_candidacies),
+  ) %>% 
+  count()
+
+```
+
+**Threshold 3%**
+
+```{r}
+threshold <- 3 
+
+data_2023 %>% 
+  arrange(desc(voting_results_pct)) %>%
+  filter(voting_results_pct >= threshold) %>% 
+  distinct(abbrev_candidacies) 
+
+data_hist %>%
+  group_by(id_elec) %>%
+  arrange(desc(voting_results_pct), .by_group = TRUE) %>%
+  summarise(
+    parties_in = paste(unique(abbrev_candidacies[voting_results_pct >= threshold]), collapse = ", "),
+    .groups = "drop"
+  )
+```
+
+data_2023: left with 4 parties. data_hist: between 3 and 6 parties
+
+**Threshold 2%**
+
+```{r}
+threshold <- 2
+
+data_2023 %>% 
+  arrange(desc(voting_results_pct)) %>%
+  filter(voting_results_pct >= threshold) %>% 
+  distinct(abbrev_candidacies) 
+
+data_hist %>%
+  group_by(id_elec) %>%
+  arrange(desc(voting_results_pct), .by_group = TRUE) %>%
+  summarise(
+    parties_in = paste(unique(abbrev_candidacies[voting_results_pct >= threshold]), collapse = ", "),
+    .groups = "drop"
+  )
+```
+
+data_2023: left with 4 parties. data_hist: between 3 and 7 parties
+
+Comparison of drop:
+
+```{r}
+before_stats <- data_hist %>%
+  group_by(id_elec) %>%
+  summarise(
+    n_parties_before = n_distinct(abbrev_candidacies),
+    n_obs_before = n(),  # number of rows (poll-party observations)
+    .groups = "drop"
+  )
+
+after_stats <- data_hist %>%
+  filter(!is.na(voting_results_pct), voting_results_pct >= threshold) %>%
+  group_by(id_elec) %>%
+  summarise(
+    n_parties_after = n_distinct(abbrev_candidacies),
+    n_obs_after = n(),
+    .groups = "drop"
+  )
+
+before_stats %>%
+  left_join(after_stats, by = "id_elec") %>%
+  mutate(
+    dropped_parties = n_parties_before - n_parties_after,
+    dropped_obs = n_obs_before - n_obs_after, 
+    total_obs = sum(n_obs_after)
+  )
+
+data_2023 %>% 
+  arrange(desc(voting_results_pct)) %>%
+  filter(voting_results_pct >= threshold) %>% 
+  summarise(
+    n_parties_after = n_distinct(abbrev_candidacies),
+    n_obs_after = n()
+  )
+
+```
+
+`data_2023`:
+
+-   left with 2982 observations (before = 7694)
+
+`data_hist`:
+
+-   left with 10345 observations (before = 16300)
+
+=\> good balance
+
+Hence we reduce:
+
+```{r}
+data_2023 <- data_2023 %>% 
+  filter(voting_results_pct >= 2) 
+
+data_hist <- data_hist %>% 
+  filter(voting_results_pct >= 2) 
+  
+```
+
+We check to make sure:
+
+```{r}
+plot_intro(data_2023)
+profile_missing(data_2023)
+count(data_2023) # 2982
+
+plot_intro(data_hist)
+profile_missing(data_hist)
+count(data_hist) # 10345
+```
+
+### Excluding pollsters from data_hist
+
+```{r}
+# pollsters from historical data 
+data_hist %>% distinct(polling_firm) %>% count() #122
+
+pollsters_hist <- data_hist %>% 
+  distinct(id_survey, polling_firm) %>% 
+  count(polling_firm, name = "n_unique_polls") %>% 
+  filter(n_unique_polls >= 10) %>% 
+  pull(polling_firm)
+
+pollsters_hist %>% length() # 42
+
+# pollsters from 2023 that have more than 10 polls (it is important later for the calculation of the MAE). we can either do this now or later when calculating MAE benches. i do this now here because i wanted to have as much data reduction together as possible 
+data_2023 %>% distinct(polling_firm) %>% count() #40
+
+pollsters_2023 <- data_2023 %>% 
+  distinct(id_survey, polling_firm) %>% 
+  count(polling_firm, name = "n_unique_polls") %>% 
+  filter(n_unique_polls >= 10) %>% 
+  pull(polling_firm)
+
+
+pollsters_2023 %>% length() # 21
+```
+
+42 out of 122 pollsters in the historical dataset have more than 10 polls (we discard 80).
+
+21 out of 40 pollsters in the 2023 dataset have more than 10 polls (we discard 19).
+
+We only keep the 21 pollsters of the 2023 dataset for both the 2023 dataset and for the historical dataset.
+
+```{r}
+data_hist <- data_hist %>% 
+  filter(polling_firm %in% intersect(pollsters_hist, pollsters_2023))
+
+# sanity check
+data_hist %>%
+  summarise(
+    n = n(),
+    na_results = sum(is.na(voting_results_pct)), 
+    na_est = sum(is.na(estimated_voting)), 
+    na_id_survey = sum(is.na(id_survey))
+  ) 
+
+data_hist %>% count() # 6111
+
+
+data_2023 %>% 
+  count() # 2982
+
+```
+
+Left with 6111 observations for `data_hist`.
+
+We do not delete yet the pollsters with \<10 polls for `data_2023`, as we will firstly do some EDA and will look at the differences between pollsters, also including those with less polls. Hence, currently we have 2982 observations.
+
+It makes sense that the datasets are not far off in size since we are looking for pollsters that still exist in 2023.
+
+
+# Saving data for downstream usage 
+
+We continue our analysis in the document "**2. Data 2023 EDA + house effects calculation**".
+
+```{r}
+saveRDS(data_2023, "./data/data_2023.rds")
+saveRDS(data_hist, "./data/data_hist.rds")
+```

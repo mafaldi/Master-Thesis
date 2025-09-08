@@ -1,0 +1,2180 @@
+---
+title: "2. Data 2023 EDA + house effects calculation"
+author: "Mafalda González González"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+```{r global_options, include=T, echo = F}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, eval=T)
+options(scipen = 999)
+```
+
+# library
+
+```{r}
+
+rm(list = ls())
+
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(lubridate)
+library(stringr)
+library(readr)
+
+
+library(DataExplorer) # EDA 
+library(skimr) 
+library(ggalluvial)
+library(data.table) 
+library(lubridate)
+library(zoo)
+
+library(PerformanceAnalytics) # descriptive modeling
+library(corrplot)
+
+library(broom) # lm
+library(lme4)
+library(broom.mixed)
+
+library(forcats) # cross validation
+library(caret)
+
+
+
+# party palette 
+party_colors <- c("PP" = "#1db4e8",
+      "PSOE" = "#c30505",
+      "SUMAR" = "#e71853",
+      "PODEMOS" = "#a444b4",
+      "VOX" = "#83b431",
+      "ERC" = "#ffbf41",
+      "ERC-CATSI" = "#ffbf41",
+      "CIU" = "#1b348a",
+      "CDC" = "#1b348a",
+      "DIL" = "#1b348a",
+      "MP" = "#004938",
+      "CS" = "#eb6109",
+      "PNV" = "darkgreen",
+      "BNG" = "lightblue",
+      "EH-BILDU" = "lightgreen",
+      "JXCAT-JUNTS" = "#03cfb4",
+      "CC" = "#2f6da6",
+      "UPN" = "#e72c2e",
+      "NC-BC" = "#81c03b",
+      "UPL" = "#b71966",
+      "EXISTE" = "#227e57",
+      "CUP" = "#fff201",
+      "ECP" = "#a444b4", 
+      "ENMAREA" = "#a444b4",
+      "COMPROMIS" = "#d95827",
+      "IU" = "#a9272f", 
+      "UPYD" = "#e5007d",
+      "AMAIUR" = "#0198b3",
+      "ERPV" = "#ffbf41",
+      "PSA-PA" = "#19a24a",
+      "CDS" = "#b2c544",
+      "AP-PDP-PL" = "#ffa518",
+      "UCD" = "#1a7e36",
+      "PCE" = "#961425",
+      "HB" = "#613000"
+    )
+
+```
+
+# Data
+
+We load the data we have prepared in "**1. Datasets creation and feature engineering**".
+
+```{r}
+data_2023 <- readRDS("./data/data_2023.rds")
+data_hist <- readRDS("./data/data_hist.rds")
+```
+
+# EDA
+
+We now do an explorative analysis of the 2023 election and survey data. We first create a dataset with which to do the EDA, with an added variable `error`, which represents the polling error of each survey poll for the 2023 election.
+
+```{r}
+data_2023_EDA <- data_2023 %>% 
+  mutate(error = estimated_voting - voting_results_pct) # error per poll
+```
+
+Further, I save this data to use it later to generate the figures and tables for the final Thesis document.
+
+```{r}
+saveRDS(data_2023_EDA, "./data/data_2023_EDA.rds")
+```
+
+## Numbers
+
+### dataset info
+
+```{r}
+plot_intro(data_2023_EDA)
+profile_missing(data_2023_EDA)
+
+```
+
+### general overview
+
+```{r}
+# glimpse(data_2023_EDA) 
+
+cat("Total observations:\t", 
+    nrow(data_2023_EDA), 
+    "\nNumber of parties:\t", 
+    data_2023_EDA %>% distinct(abbrev_candidacies) %>% nrow(), 
+    "\nMean sample size:\t", as.integer(mean(data_2023_EDA$sample_size, na.rm = TRUE)),
+    "\nFieldwork start range:\t", 
+    paste(format(range(data_2023_EDA$fieldwork_start), "%d.%m.%Y"), collapse = " - "), 
+    "\nFieldwork end range:\t", 
+    paste(format(range(data_2023_EDA$fieldwork_end), "%d.%m.%Y"), collapse = " - "),
+    "\nMean field days:\t", round(mean(data_2023_EDA$n_field_days), 1)
+)
+
+
+
+```
+
+This dataset, with all pollsters big or small, has 2982 observations. These are 2982 surveys, which are fractioned between 4 different parties. The mean sample size of each survey is 1946 respondents, and the mean field days are between 5 and 6. Polling information stops on the 22.07.2023, one day before the election day (23.07.2023).
+
+### parties
+
+```{r}
+data_2023_EDA %>%  
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    vote_share = round(first(voting_results_pct), 2), 
+    avg_estimate = round(mean(estimated_voting), 2), 
+    error_avg = round(mean(error), 2), 
+    polls = n(), 
+    first_year = first(first_year), 
+    party_age = first(party_age), 
+    party_elec_count = first(party_elec_count), 
+    fieldwork_start = min(fieldwork_start), 
+    fieldwork_end = max(fieldwork_end)
+  ) %>% 
+  arrange(desc(vote_share))
+
+```
+
+Difference between vote share =\> big two have 33, 31, small two have 12
+
+interestingly, SUMAR, the fourth strongest party with 12.33% vote share, has the lower number of polls (202), and was also the first time it was available to vote at general elections. we can see that the establishment of SUMAR as the party that would go into elections was relatively late, as it wasnt included in any poll fieldwork until july of 2023, while the other parties had been polled since 2019
+
+the biggest parties (PP, PSOE) have the highest polling errors
+
+### polling firms
+
+```{r}
+data_2023_EDA %>% 
+  group_by(polling_firm) %>% 
+  summarise(
+    avg_sample_size = as.integer(mean(sample_size)), 
+    avg_field_days = round(mean(n_field_days), 1),
+    error_avg = round(mean(error), 2), 
+    sd_error_avg = round(sd(error), 2), 
+    n_polls_per_firm = n()
+  ) %>% 
+  arrange(error_avg)
+
+data_2023_EDA %>% 
+  group_by(polling_firm) %>% 
+  summarise(n_polls = n()) %>% 
+  filter(n_polls <= 10) 
+
+```
+
+## Plots
+
+### actual vs predicted vote share
+
+```{r}
+ggplot(data_2023_EDA, aes(x = voting_results_pct, y = estimated_voting, colour = abbrev_candidacies)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey30") +
+  labs(
+    title = paste("Actual vs Estimated Vote Share", data_2023_EDA$year),
+    x = "Actual Vote Share (%)",
+    y = "Estimated Vote Share (%)",
+    colour = "Party"
+  ) +
+  theme_minimal() + 
+  scale_colour_manual(values = party_colors)
+```
+
+```{r}
+data_2023_EDA %>%
+  
+  # dataframe 
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    actual = mean(voting_results_pct, na.rm = TRUE),
+    predicted = mean(estimated_voting, na.rm = TRUE)
+  ) %>%
+  mutate(
+    actual = actual / sum(actual),
+    predicted = predicted / sum(predicted)
+  ) %>%
+  pivot_longer(cols = c(actual, predicted), names_to = "axis", values_to = "share") %>%
+  mutate(axis = recode(axis, "actual" = "Actual", "predicted" = "Estimated")) %>% 
+  
+  # ready for plot 
+  rename(party = abbrev_candidacies) %>%
+  mutate(axis = factor(axis, levels = c("Actual", "Estimated"))) %>%
+  group_by(party) %>%
+  arrange(axis) %>% 
+  
+  # Plot 
+  ggplot(aes(x = axis, stratum = party, alluvium = party, y = share, fill = party)) +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback", alpha = 0.8, width = 0.3) +
+  geom_stratum(width = 0.3, color = "black") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 3.5) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_fill_manual(values = party_colors) +
+  labs(
+    title = paste("Actual vs Estimated Vote Share (Alluvial View)", data_2023_EDA$year),
+    x = NULL, y = "Vote Share", fill = "Party"
+  ) +
+  theme_minimal() 
+```
+
+### polling error by party
+
+```{r}
+data_2023_EDA %>% 
+  ggplot(aes(x = fct_reorder(abbrev_candidacies, error, .fun = median), y = error, fill = abbrev_candidacies)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  labs(
+    title = paste("Polling Error by Party (Estimated - Actual)", data_2023_EDA$year), 
+    x = "Party",
+    y = "Polling Error (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none", 
+    axis.text.x = element_text(angle = 40, hjust = 1)
+    ) + 
+  scale_fill_manual(values = party_colors)
+```
+
+### polling error by polling firm
+
+```{r}
+data_2023_EDA %>% 
+  ggplot(aes(x = fct_reorder(polling_firm, error, .fun = median), y = error)) +
+  geom_boxplot(fill = "steelblue", outlier.alpha = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~abbrev_candidacies) +
+  coord_flip() +
+  labs(
+    title = paste("Polling Error by Polling Firm (Estimated - Actual)", data_2023_EDA$year), 
+    x = "Polling Firm",
+    y = "Polling Error (%)"
+  ) +
+  theme_minimal() 
+```
+
+### poll volume over time
+
+```{r}
+data_2023_EDA %>%  
+  mutate(mid_fieldwork = as.Date(fieldwork_start) + n_field_days / 2) %>% 
+  ggplot(aes(x = mid_fieldwork, fill = abbrev_candidacies)) +
+  geom_histogram(binwidth = 50, position = "stack") + 
+  labs(
+    title = paste("Number of Polls Over Time (Mid Fieldwork Date)", data_2023_EDA$year), 
+    x = "Date", 
+    y = "Number of Polls", 
+    fill = "Party"
+  ) + 
+  theme_minimal() + 
+  scale_fill_manual(values = party_colors)
+
+
+```
+
+### predicted winners over time by pollster
+
+```{r}
+# actual winner on election day tile
+election_day <- as.Date(sub("^02-", "", unique(data_2023$id_elec)))
+
+data_heat <- data_2023_EDA %>%  
+  mutate(
+    mid_date = as.Date(fieldwork_start) + n_field_days/2
+  ) 
+
+predicted_winner <- data_heat %>% 
+  group_by(id_survey) %>% 
+  slice_max(estimated_voting, with_ties = FALSE) %>% # no ties, only one winner 
+  ungroup()
+
+actual_winner <- data_2023_EDA %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    actual_vote = mean(voting_results_pct)
+    ) %>% 
+  slice_max(actual_vote, n = 1, with_ties = FALSE) %>% 
+  pull(abbrev_candidacies)
+
+pollster_list <- predicted_winner %>% 
+  group_by(polling_firm) %>% 
+  summarize(
+    polls = n()
+  ) %>% 
+  slice_max(polls, n = 15) %>% 
+  distinct(polling_firm) 
+
+
+final_winner_tile <- pollster_list %>% 
+  mutate(
+    mid_date = election_day,
+    abbrev_candidacies = actual_winner
+  )
+
+pollster_list <- pollster_list %>% 
+  pull(polling_firm)
+
+tiles <- bind_rows(
+  predicted_winner %>% 
+    select(polling_firm, mid_date, abbrev_candidacies),
+  final_winner_tile
+) %>% 
+  filter(polling_firm %in% pollster_list)
+
+
+# Plot 
+ggplot(tiles, aes(x = mid_date, y = fct_rev(polling_firm), fill = abbrev_candidacies)) +
+  geom_tile(colour = "white", height = 0.95, width = 7) +
+  scale_fill_manual(values = party_colors) +
+  labs(
+    title = paste("Predicted Winners Over Time by Pollster", data_2023_EDA$year),
+    subtitle = "Final election winner shown as last column",
+    x = "Date (Fieldwork Midpoint → Election Day)",
+    y = "Polling Firm",
+    fill = "Predicted Winner"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+```
+
+### predicted winners over time by parties
+
+#### week normal
+
+```{r}
+winner_counts <- data_2023_EDA %>%
+  mutate(week = cut(as.Date(fieldwork_start), breaks = "2 weeks")) %>%
+  group_by(id_survey) %>%
+  slice_max(order_by = estimated_voting, with_ties = FALSE) %>%
+  ungroup() %>%
+  group_by(week, abbrev_candidacies) %>%
+  summarise(count = n(), .groups = "drop")
+
+
+# find top predicted party per week ! 
+# NOTE: we are doing TOP PREDICTED, NOT avg predicted ! median instead of mean 
+
+weekly_winner <- winner_counts %>%
+  group_by(week) %>%
+  slice_max(order_by = count, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(week) %>%
+  mutate(week = as.Date(week), 
+         rleid = data.table::rleid(abbrev_candidacies) # detect runs of same winner across consecutive weeks
+         )
+
+winner_periods <- weekly_winner %>%
+  group_by(rleid, abbrev_candidacies) %>%
+  summarise(
+    start = min(week),
+    end = max(week) + 7, # to include the full week
+    .groups = "drop"
+  )
+
+# actual winner + period 
+actual_winner <- data_2023_EDA %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    actual_vote = mean(voting_results_pct)
+    ) %>% 
+  slice_max(actual_vote, n = 1, with_ties = FALSE) %>% 
+  pull(abbrev_candidacies)
+
+election_day <- as.Date(sub("^02-", "", unique(data_2023_EDA$id_elec)))
+
+election_day
+
+actual_winner_period <- data.frame(
+  start = election_day,
+  end = election_day + 90,
+  abbrev_candidacies = actual_winner
+)
+
+
+ggplot() +
+  # shaded area for predicted winner
+  geom_rect(data = winner_periods,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf, fill = abbrev_candidacies),
+            alpha = 0.1, inherit.aes = FALSE) +
+  
+   # shaded area for actual winner
+  geom_rect(data = actual_winner_period,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = party_colors[actual_winner],
+            alpha = 0.2, inherit.aes = FALSE) +
+  
+  # geom_line + dots
+  geom_line(data = winner_counts,
+            aes(x = as.Date(week), y = count, colour = abbrev_candidacies),
+            size = 0.8) +
+  
+  geom_point(data = winner_counts,
+             aes(x = as.Date(week), y = count, colour = abbrev_candidacies),
+             size = 1.2) +
+  
+  # election day vertical line 
+  geom_vline(xintercept = as.numeric(election_day), 
+             linetype = "dashed", colour = "black", linewidth = 0.7) +
+  annotate("text", 
+           x = election_day, 
+           y = max(winner_counts$count, na.rm = TRUE) + 1, # to put it at the point of the winner 
+           label = paste("Election Date:", election_day), 
+           angle = -90, # so that reads goes down
+           hjust = 0, # so that it goes down
+           vjust = -0.5, # so that it is to the right of the line 
+           fontface = "italic") +
+  scale_color_manual(values = party_colors) +
+  scale_fill_manual(values = party_colors) +
+  labs(
+    title = paste("Predicted Biweekly Wins by Party (Shaded by Leading Party)", data_2023_EDA$year),
+    x = "Week",
+    y = "Count of Predicted Wins",
+    colour = "Predicted Party",
+    fill = "Leading Party"
+  ) +
+  theme_minimal()
+
+
+
+
+```
+
+#### month normal
+
+```{r}
+
+winner_counts_m <- data_2023_EDA %>%
+  filter(polling_firm %in% pollster_list) %>% 
+  mutate(month = floor_date(as.Date(fieldwork_start), unit = "month")) %>%
+  group_by(id_survey) %>%
+  slice_max(order_by = estimated_voting, with_ties = FALSE) %>%
+  ungroup() %>%
+  group_by(month, abbrev_candidacies) %>%
+  summarise(count = n(), .groups = "drop")
+
+
+# find top predicted party per day 
+monthly_winner <- winner_counts_m %>%
+  group_by(month) %>%
+  slice_max(order_by = count, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(month) %>%
+  mutate(rleid = data.table::rleid(abbrev_candidacies))
+
+winner_periods_m <- monthly_winner %>%
+  group_by(rleid, abbrev_candidacies) %>%
+  summarise(
+    start = min(month),
+    end = max(month) + months(1),  # cover full month
+    .groups = "drop"
+  )
+
+# actual winner + period 
+actual_winner <- data_2023_EDA %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    actual_vote = mean(voting_results_pct)
+    ) %>% 
+  slice_max(actual_vote, n = 1, with_ties = FALSE) %>% 
+  pull(abbrev_candidacies)
+
+election_day <- as.Date(sub("^02-", "", unique(data_heat$id_elec)))
+
+actual_winner_period <- data.frame(
+  start = election_day,
+  end = election_day + 90,
+  abbrev_candidacies = actual_winner
+)
+
+ggplot() +
+  # shaded area for predicted winner
+  geom_rect(data = winner_periods_m,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf, fill = abbrev_candidacies),
+            alpha = 0.1, inherit.aes = FALSE) +
+  
+   # shaded area for actual winner
+  geom_rect(data = actual_winner_period,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = party_colors[actual_winner],
+            alpha = 0.2, inherit.aes = FALSE) +
+
+  # geom_line
+  geom_line(data = winner_counts_m,
+          aes(x = month, y = count, colour = abbrev_candidacies),
+          size = 0.8) +
+  
+  geom_point(data = winner_counts_m,
+             aes(x = month, y = count, colour = abbrev_candidacies),
+             size = 1.2) +
+    
+  
+  # election day vertical line 
+  geom_vline(xintercept = as.numeric(election_day), 
+             linetype = "dashed", colour = "black", linewidth = 0.7) +
+    
+  annotate("text", 
+           x = election_day, 
+           y = max(winner_counts_m$count, na.rm = TRUE) + 1, # to put it at the point of the winner 
+           label = paste("Election Date:", election_day), 
+           angle = -90, # so that reads goes down
+           hjust = 0, # so that it goes down
+           vjust = -0.5, # so that it is to the right of the line 
+           fontface = "italic") +
+  scale_color_manual(values = party_colors) +
+  scale_fill_manual(values = party_colors) +
+  labs(
+    title = paste("Predicted Monthly Wins by Party (Shaded by Leading Party)", data_2023_EDA$year),
+    x = "Month",
+    y = "Count of Predicted Wins",
+    colour = "Predicted Party",
+    fill = "Leading Party"
+  ) +
+  theme_minimal()
+
+
+```
+
+#### month smooth
+
+```{r}
+winner_counts_m_smoothed <- winner_counts_m %>%
+  group_by(abbrev_candidacies) %>%
+  arrange(month) %>%
+  mutate(count_smooth = rollmean(count, k = 3, fill = NA, align = "right")) %>%
+  ungroup()
+
+ggplot() +
+  # shaded area for predicted winner
+  geom_rect(data = winner_periods_m,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf, fill = abbrev_candidacies),
+            alpha = 0.1, inherit.aes = FALSE) +
+  
+   # shaded area for actual winner
+  geom_rect(data = actual_winner_period,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = party_colors[actual_winner],
+            alpha = 0.2, inherit.aes = FALSE) +
+  
+  # geom_line
+  geom_line(data = winner_counts_m_smoothed,
+          aes(x = month, y = count_smooth, colour = abbrev_candidacies),
+          linewidth = 1.2) +
+  
+  # election day vertical line 
+  geom_vline(xintercept = as.numeric(election_day), 
+             linetype = "dashed", colour = "black", linewidth = 0.7) +
+    
+  annotate("text", 
+           x = election_day, 
+           y = max(winner_counts_m$count, na.rm = TRUE) + 1, # to put it at the point of the winner 
+           label = paste("Election Date:", election_day), 
+           angle = -90, # so that reads goes down
+           hjust = 0, # so that it goes down
+           vjust = -0.5, # so that it is to the right of the line 
+           fontface = "italic") +
+  scale_color_manual(values = party_colors) +
+  scale_fill_manual(values = party_colors) +
+  labs(
+    title = paste("Predicted Monthly Wins by Party (Shaded by Leading Party)", data_2023_EDA$year),
+    x = "Month",
+    y = "Count of Predicted Wins",
+    colour = "Predicted Party",
+    fill = "Leading Party"
+  ) +
+  theme_minimal()
+
+```
+
+### poll estimates by party
+
+```{r}
+
+data_2023_EDA %>%
+  
+  # computation
+  mutate(week = cut(as.Date(fieldwork_start), breaks = "1 week")) %>%
+  group_by(week, abbrev_candidacies) %>%
+  summarise(
+    avg_estimate = mean(estimated_voting, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+
+  # Plot   
+  ggplot(aes(x = as.Date(week), y = avg_estimate, fill = abbrev_candidacies)) +
+  geom_area(alpha = 0.9, colour = "white", size = 0.2) +
+  scale_fill_manual(values = party_colors) +
+  labs(
+    title = paste("Evolution of Average Poll Estimates by Party", data_2023_EDA$year),
+    x = "Week",
+    y = "Estimated Vote Share (%)",
+    fill = "Party"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+```
+
+### comparison of real, average and individual polls
+
+-   bar height = actual election result per party
+-   points = individual avg polling firm estimates
+-   horizontal line = avg estimated voting in total
+
+```{r}
+# avg estimate and actual result
+party_summary <- data_2023_EDA %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    avg_poll = mean(estimated_voting),
+    avg_poll_label = paste0(round(avg_poll, 1), "%"),
+    actual_result = mean(voting_results_pct),
+    actual_label = paste0(round(actual_result, 1), "%"),
+    .groups = "drop"
+  )
+
+# more space between bars
+party_summary <- party_summary %>%
+  mutate(x_position = as.numeric(as.factor(abbrev_candidacies)) * 1.5) 
+
+data_2023_EDA_x <- data_2023_EDA %>%
+  mutate(x_position = as.numeric(as.factor(abbrev_candidacies)) * 1.5)
+
+ggplot() +
+  
+  # bar: actual results
+  geom_col(data = party_summary,
+           aes(x = x_position, y = actual_result, fill = abbrev_candidacies),
+           width = 0.6, 
+           alpha = 0.5) + 
+  
+  geom_text(data = party_summary,
+          aes(x = x_position, y = -1, label = actual_label, colour = abbrev_candidacies), fontface = "bold", size = 3) +
+
+  # points: individual poll estimates
+  geom_jitter(data = data_2023_EDA_x,
+              aes(x = x_position, y = estimated_voting, colour = abbrev_candidacies),
+              width = 0.2, size = 0.7) +
+
+  # segments line: avg estimated vote share total
+  geom_segment(data = party_summary,
+               aes(x = x_position, 
+                 xend = x_position + 0.8,
+                 y = avg_poll, yend = avg_poll),
+               colour = "black", linewidth = 0.8) +
+
+  geom_text(data = party_summary,
+            aes(x = x_position + 1.1, 
+                y = avg_poll, 
+                label = avg_poll_label),
+            colour = "black", 
+            fontface = "bold", 
+            size = 3,
+            hjust = 1, # aligns to the right
+            vjust = -0.4) + # sits on top of the line
+  
+  # custom spacing 
+  scale_x_continuous(
+    breaks = party_summary$x_position,
+    labels = party_summary$abbrev_candidacies
+  ) +
+  
+  scale_fill_manual(values = party_colors) +
+  scale_colour_manual(values = party_colors) +
+
+  labs(
+    title = paste("Comparison of Total Poll Averages, Pollster Estimates, and Actual Results", data_2023_EDA$year),
+    x = "Party",
+    y = "Vote Share (%)",
+    fill = "Party",
+    colour = "Party"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 40, hjust = 1),
+    panel.grid.major.x = element_blank(), 
+    panel.grid.minor.x = element_blank()
+    )
+
+
+```
+
+## Data reduction 2023 after EDA
+
+After having completed EDA, we now discard polls with \<10 pollsters for `data_2023`, just like we did for `data_hist`. We did not do it before as we wanted to leave smaller pollsters for EDA, but will adapt it now.
+
+```{r}
+data_2023 %>% 
+  distinct(polling_firm) %>%
+  count() # 40 pollsters in 2023
+
+pollsters_2023 <- data_2023 %>% 
+  distinct(id_survey, polling_firm) %>% 
+  count(polling_firm, name = "n_unique_polls") %>% 
+  filter(n_unique_polls >= 10) %>% 
+  pull(polling_firm)
+
+pollsters_2023 %>% length() # 21 pollsters
+
+data_2023 <- data_2023 %>% 
+  filter(polling_firm %in% pollsters_2023)
+
+data_2023 %>% 
+  count() # 2861
+```
+
+After excluding pollsters with \<10 polls in 2023, we are left with 2861 observations.
+
+# Descriptive Modeling (Interpretation of the polling estimates)
+
+## Theory
+
+> Aim: to demonstrate why correction is needed in the first place and justify modelling choices and corrections.
+
+Descriptive models are used here not as ends in themselves, but to diagnose the structure and persistence of polling biases. A simple model is sufficient to show that errors are systematic (not random), differ by pollster, and vary across parties, thus justifying the need for house effect correction. Descriptive results therefore serve as a foundation for the correction strategies. Later, the focus can shift to manual house effect correction as well as predictive models where the goal is to improve accuracy of vote share forecasting.
+
+**Mixed effects model: polling_firm as random effect**
+
+-   Aim: This models sets out to determine whether polling firm identity introduces systematic between-firm variation in vote estimates, which would mean that polling firms introduce unobserved heterogeneity.
+-   Formula: `lmer(estimated_voting ~ n_field_days + ... + ( 1 | polling_firm)`
+
+## Data preparation
+
+```{r}
+data_2023_desc <- data_2023
+```
+
+### Variable selection
+
+We have to assess collinearity!
+
+```{r}
+data_2023_num <- data_2023_desc %>% 
+  select(c(n_field_days, sample_size, party_elec_count, party_age, first_time)) %>% 
+  drop_na()
+ 
+chart.Correlation(data_2023_num)
+
+corrplot(cor(data_2023_num))
+
+corr_matrix <- cor(data_2023_num, use = "complete.obs")
+plot_correlation(corr_matrix)
+subset(as.data.frame(as.table(corr_matrix)), abs(Freq) > 0.65 & Var1 != Var2) # take out >65 correlation
+```
+
+We take out `party_age` as it is highly correlated with `party_elec_count`, due to being created out of the same information.
+
+```{r}
+data_2023_num <- data_2023_num %>% 
+  select(-party_age) %>% 
+  drop_na()
+
+chart.Correlation(data_2023_num)
+
+corrplot(cor(data_2023_num))
+
+corr_matrix <- cor(data_2023_num, use = "complete.obs")
+plot_correlation(corr_matrix)
+subset(as.data.frame(as.table(corr_matrix)), abs(Freq) > 0.65 & Var1 != Var2) 
+```
+
+Thus we use the variables: `n_field_days`, `sample_size`, `party_elec_count`, `first_time`
+
+### Scaling
+
+Scaling for comparison of coefficients!
+
+```{r}
+data_2023_desc <- data_2023_desc %>% 
+  select(c(estimated_voting, polling_firm, n_field_days, sample_size, party_elec_count, first_time)) %>% 
+  mutate(across(where(is.numeric) & !c(estimated_voting), scale)) 
+```
+
+## Mixed-effects model: `polling_firm` as random effect
+
+```{r}
+set.seed(70901)
+descriptive_model <- lmer(estimated_voting ~ 
+                            n_field_days + 
+                            sample_size +
+                            party_elec_count + 
+                            first_time + 
+                            (1 | polling_firm),
+                          data = data_2023_desc)
+
+
+summary(descriptive_model)
+```
+
+> Aim: This models sets out to determine whether polling firm identity introduces systematic between-firm variation in vote estimates, which would mean that polling firms introduce unobserved heterogeneity.
+
+Key findings:
+
+-   Covariates:
+
+    -   `party_elec_count`: β = +5.78 =\> Parties with more electoral experience are estimated to receive higher vote shares
+    -   `first_time`: β = +0.11 =\> First-time participation is positively associated with vote estimates, but the effect is small and not statistically significant (t = 1.34)
+    -   `n_field_days`: β = -0.05 =\> Longer fieldwork durations are associated with slightly lower vote estimates, but the effect is very small and not significant (t = -0.57)
+    -   `sample_size`: β = + 0.22 =\> Larger samples are associated with higher vote estimates. This effect is statistically significant (t = 2.47), though modest in size
+
+-   Model fit & Random effects:
+
+    -   Random intercept Variance (polling_firm): 0.238
+    -   Random intercept SD (polling_firm): 0.488
+    -   Residual variance: 13.201
+    -   Variance explained by pollster: 0.238/(0.238+13.201) = 1.77% of total the total variance is due to polling firm differences. The model confirms some degree of systematic variation across polling firms, but the magnitude is modest.
+
+-   Polling firm identity accounts for a non-trivial share of estimation differences, reinforcing the idea that house effects are structural and should be accounted for systematically.
+
+-   Mixed-effects models: moderate support for incorporating model-based house effect correction, especially in settings with more subtle or constrained firm-level bias.
+
+# House effects calculation for 2023
+
+## Theory: correction design
+
+**House effects** are systematic pollster biases. For a poll *p* and party *j* we have: *error~p,j~ = estimated_voting~p,j~ - voting_results_pct~j~*
+
+=\> overestimation if positive, underestimation if negative
+
+1.  **Historical house effect (firm x party)**: prediction error within each past election (id_elect) (error = estimated_voting - voting_results_pct) + avg house effect for each pollster = avg past error for each pollster-party.
+
+2.  **Pollster rating** out of pollsters' past performance for weighting the current election benchmark: we compute the average errors (MAE/RMSE) of the past historical performance of polling firms in order *to later calculate "imaginary results" out of the total average predictions of the pollsters giving more weight to predictions of pollsters that have more often been correct*.
+
+3.  **Weights computations** (data_benchmark): weight (inverse transforms) each current poll by (i) past performance (lower MAE/RMSE = higher weight) + (ii) poll rencency (less days until election = higher weight) =\> we compute a weighted party benchmark (consensus)
+
+-   We do not use sample size as a weight, as the literature points towards it having no significance
+
+Preparing the 2023 dataset used to build the weighted benchmark:
+
+-   **Pollster reduction**: we reduce the dataset to exclude new pollsters that have no historical references
+
+    -   if we do not do this the weights get thrown off by pollsters that have nothing to compare to, and MAE/RMSE cannot be computed =\> we can only check house effects for pollster that actually have historical data behind
+
+-   **Party reduction**: we need to also reduce the dataset by those parties that did not exits before these elections as they also have no historical house effects, due to not having historical comparisons
+
+4.  **Benchmark house effects (firm x party)**: we compute how each pollster typically deviated from the consensus (not the true result!): average error_benchmark = estimated_voting - weighted_results
+
+    -   We compute `error_benchmark = estimated_voting - weighted_results` to show how far each poll deviates from the weighted consensus (benchmark), not the real result. Then we compute the average of that benchmark error per polling firm × party, with `mean(error_benchmark) = error_avg_benchmark` we get the benchmark house effects
+
+5.  **Debiasing current election polls**: we debias the raw poll estimate by the benchmark house effects with `debiased_estimated_voting = estimated_voting - error_avg_benchmark`. This gives us debiased estimates adjusted for how that pollster typically deviates from the consensus (benchmark)
+
+    -   **Regular (historical)**: we subtract historical avg error (firm x party) from each poll estimate
+    -   **Benchmark (consensus-based)**: we subtract benchmark avg error (firm x party) from each poll estimate
+
+6.  **Partisan bias**: integration of new pollsters in current elections by shrinking their estimates toward broader, more stable baselines, i.e., partial pooling, based on the partisan bias of all pollsters for existing (historical) parties
+
+## 1. Historical prediction errors + historical house effects (firm x party)
+
+**Historical house effect (firm x party)**: prediction error within each past election (id_elect) (error = estimated_voting - voting_results_pct) + avg house effect for each pollster = avg past error for each pollster-party
+
+we check the validity of the dataset:
+
+```{r}
+data_hist %>%
+  summarise(
+    n = n(),
+    na_results = sum(is.na(voting_results_pct)), 
+    na_est = sum(is.na(estimated_voting)), 
+    na_id_survey = sum(is.na(id_survey))
+  ) # n = 7907
+```
+
+calculating error and error_avg
+
+```{r}
+# error per poll in past elections 
+data_hist <- data_hist %>% 
+  mutate(error = estimated_voting - voting_results_pct) 
+
+house_effects_hist <- data_hist %>% # en todo el historico de datos cuanto se equivoco en cada encuesta con cada partido 
+  group_by(polling_firm, abbrev_candidacies) %>% 
+  summarise(
+    error_avg = mean(error, na.rm = TRUE), 
+    sd_error_avg = sd(error, na.rm = TRUE),
+    n_polls_avg = sum(!is.na(error)),  # how many polls by pollster for each party 
+    se_avg = sd_error_avg / sqrt(n_polls_avg),
+    ci_lower_avg = error_avg - 1.96 * se_avg,
+    ci_upper_avg = error_avg + 1.96 * se_avg, 
+    .groups = "drop"
+  )
+
+tail(house_effects_hist)
+```
+
+## 2. Pollster rating on past performance (MAE/RMSE)
+
+We compute the average errors (MAE/RMSE) of the past historical performance of polling firms.
+
+```{r}
+# historical errors MAE/RMSE 
+MAE_RMSE_hist <- data_hist %>%  
+  group_by(polling_firm) %>% 
+  summarise(
+    MAE = mean(abs(error), na.rm = TRUE), 
+    RMSE = sqrt(mean((error)^2, na.rm = TRUE)),
+    n_obs = sum(!is.na(error)), 
+    n_missing = sum(is.na(error)), 
+    .groups = "drop"
+  ) 
+
+MAE_RMSE_hist
+
+```
+
+## 3. Weights computations
+
+Preparing `data_2023_consensus` used to build the weighted consensus out of the weighted averages of all the estimates:
+
+1.  **Pollster reduction**: we reduce the dataset to exclude new pollsters that have no historical references
+
+-   if we do not do this the weights get thrown off by pollsters that have nothing to compare to, and MAE/RMSE cannot be computed =\> we can only check house effects for pollster that actually have historical data behind
+
+2.  **Party reduction**: we need to also reduce the dataset by those parties that did not exits before these elections as they also have no historical house effects, due to not having historical comparisons
+
+**Weight computation**:
+
+-   weight (inverse transforms) each current poll by (i) past performance (lower MAE/RMSE = higher weight) + (ii) poll rencency (less days until election = higher weight) =\> we compute a weighted party benchmark (consensus)
+
+Reducing dataset: new pollsters
+
+```{r}
+# POLLSTERS --------------------------------------
+data_hist %>% 
+  distinct(polling_firm) %>% 
+  count() # 16 
+
+data_2023 %>% 
+  distinct(polling_firm) %>%
+  count() # 21 
+```
+
+We have 5 new pollsters that need to be excluded for the benchmark process.
+
+```{r}
+keep_historical <- data_hist %>% 
+  distinct(polling_firm) %>% 
+  pull(polling_firm) 
+
+data_2023_consensus <- data_2023 %>% 
+  filter(polling_firm %in% keep_historical) 
+
+# sanity check: 
+data_2023_consensus %>%
+  distinct(polling_firm) %>% 
+  pull(polling_firm) %>% 
+  length() # 16 
+
+data_2023_consensus %>%
+  group_by(polling_firm) %>% 
+  summarise(
+    rows = n(),
+    unique_polls = n_distinct(id_survey),
+    inflation_ratio = rows / pmax(unique_polls, 1)
+  ) %>% 
+  arrange(desc(inflation_ratio))
+
+```
+
+Reducing dataset: new parties
+
+```{r}
+# PARTIES ---------------------------------------
+# sanity check
+data_2023_consensus %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    n = n(),
+    na_results = sum(is.na(voting_results_pct)), 
+    na_est = sum(is.na(estimated_voting)), 
+    na_id_survey = sum(is.na(id_survey))
+  )
+
+# new parties
+data_2023 %>% 
+  filter(first_time == 1) %>% 
+  distinct(abbrev_candidacies) %>% 
+  pull()
+
+# exclusion
+data_2023_consensus <- data_2023_consensus %>% 
+  filter(first_time == 0)
+
+```
+
+Weights:
+
+```{r}
+# weights: MAE/RMSE -----------------------------
+data_2023_consensus <- data_2023_consensus %>% 
+  left_join(MAE_RMSE_hist, by = "polling_firm") 
+
+# weight: days to election ----------------------
+election_day_2023 <- as.Date(sub("^02-", "", unique(data_2023$id_elec)))
+
+
+data_2023_consensus <- data_2023_consensus %>% 
+  mutate(
+    mid_date = as.Date(fieldwork_start) + n_field_days/2, 
+    days_to_election = as.numeric(difftime(election_day_2023, mid_date, units = "days"))
+  )
+
+```
+
+We define weights as inverse MAE and inverse days to election! As inverse relationship down weights higher values:
+
+-   when x is small (close to election, low error) =\> 1/(1+0) = 1 =\> weight comes close to 1, and hence will be further factored in
+-   when x is big (further from election, higher error) =\> 1/(1+9) = 0.1 =\> weight shrinks towards 0, and will have less importance
+-   FORMULA: avoids division by zero and keeps all weight finite and bounded between 0 and 1. Thus, it provides a smooth diminishing effect without a hard cutoff
+-   THEORY: It reflects how older polls are less relevant and how less accurate pollsters are treated as less trustworthy
+
+Alternative: negative exponentional decay? exp(-x/y) y = valor minimizante, porque si no muy fuerte, 7 dias seria ya = 0
+
+-   si queremos que entren las encuestas dentro de w umbral =\> 1/1+x =\> entraran, con la exponencial se nos van
+
+-   for recency weight: normally done with exponential =\> BUT we chose x because mathematically it would be this difference eample: 1/1+91 vs exp(-90) =\> we decided for 1/1+x as LITERATURE
+
+```{r}
+# combined weights (inverse MAE x inverse days)
+data_2023_consensus <- data_2023_consensus %>% 
+  mutate(
+    recency_weight = 1 / (1 + pmax(days_to_election, 0)), # clamps negatives to 0 if any  
+    MAE_pollster_rating_weight = 1 / (1 + MAE), # accuracy per pollster = ranking 
+    RMSE_pollster_rating_weight = 1 / (1 + RMSE), 
+    combined_weight_MAE = recency_weight * MAE_pollster_rating_weight, 
+    combined_weight_RMSE = recency_weight * RMSE_pollster_rating_weight
+  )
+```
+
+## 4. Benchmark house effects (firm x party)
+
+For each election and party, we compute two consensus targets: MAE-weighted and RMSE-weighted.
+
+```{r}
+# weighted benchmark (party-level consensus for 2023)
+results_consensus <- data_2023_consensus %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise( 
+    
+    # resultados imaginarios = ponderamos el resultado de cada encuesta en funcion de nuestros weights 
+    weighted_results_MAE_rating = weighted.mean(estimated_voting, combined_weight_MAE, na.rm = TRUE), 
+    weighted_results_RMSE_rating = weighted.mean(estimated_voting, combined_weight_RMSE, na.rm = TRUE), 
+    .groups = "drop"
+  ) 
+
+results_consensus
+
+data_2023_consensus <- data_2023_consensus %>%
+  left_join(results_consensus, by = "abbrev_candidacies")
+
+# summary tables
+data_2023_consensus %>%
+  summarise(
+    n = n(),
+    na_est = sum(is.na(estimated_voting)),
+    na_w_mae = sum(is.na(combined_weight_MAE)),
+    na_w_rmse = sum(is.na(combined_weight_RMSE))
+  )
+
+```
+
+## 5. Debiasing current election polls:
+
+-   **Regular (historical)**: we subtract historical avg error (firm x party) from each poll estimate
+-   **Benchmark (consensus-based)**: we subtract benchmark avg error (firm x party) from each poll estimate
+
+1.  we compute `error_benchmark = estimated_voting - weighted_results` to show how far each poll deviates from the weighted consensus (benchmark), not the real result. Then we compute the average of that benchmark error per polling firm × party, with `mean(error_benchmark) = error_avg_benchmark` we get the benchmark house effects
+2.  we debias the raw poll estimate by the benchmark house effects with `debiased_estimated_voting = estimated_voting - error_avg_benchmark`. This gives us debiased estimates adjusted for how that pollster typically deviates from the consensus (benchmark)
+
+### 5.1 RECALCULATE house effects with the consensus (the weighted results, not the true results):
+
+```{r}
+# deviation from consensus 
+data_2023_consensus <- data_2023_consensus %>% 
+  mutate(
+    error_MAE_rating = estimated_voting - weighted_results_MAE_rating, 
+    error_RMSE_rating = estimated_voting - weighted_results_RMSE_rating
+    )
+
+
+# recalculating house effects (avg deviation per pollster x party from the benchmark house effects results (the imaginary results))
+house_effects_consensus <- data_2023_consensus %>% 
+  group_by(polling_firm, abbrev_candidacies) %>% # house effects imaginario 
+  summarise(
+    # MAE
+    error_avg_MAE_rating = mean(error_MAE_rating,  na.rm = TRUE), 
+    sd_error_MAE_rating = sd(error_MAE_rating,  na.rm = TRUE),
+    n_polls_MAE_rating = n(), 
+    se_MAE_rating = sd_error_MAE_rating / sqrt(n_polls_MAE_rating),
+    ci_lower_MAE = error_avg_MAE_rating - 1.96 * se_MAE_rating,
+    ci_upper_MAE_rating = error_avg_MAE_rating + 1.96 * se_MAE_rating,
+    
+    #RMSE 
+    error_avg_RMSE_rating = mean(error_RMSE_rating,  na.rm = TRUE), 
+    sd_error_RMSE_rating = sd(error_RMSE_rating,  na.rm = TRUE),
+    n_polls_RMSE_rating = n(), 
+    se_RMSE_rating = sd_error_RMSE_rating/ sqrt(n_polls_RMSE_rating),
+    ci_lower_RMSE_rating = error_avg_RMSE_rating - 1.96 * se_RMSE_rating,
+    ci_upper_RMSE_rating = error_avg_RMSE_rating + 1.96 * se_RMSE_rating, 
+    .groups = "drop"
+    ) 
+
+head(house_effects_consensus)
+```
+
+results_consensus: the weighted consensus vote share per party per election (historical)
+
+house_effects_consensus: how each pollster typically deviated from that consensus across all history
+
+```{r}
+# joining both correction types into 2023 data: 
+# - historical regular correction (using past error_avg)
+# - benchmark correction (using error_avg_MAE_rating / error_avg_RMSE_rating)
+
+data_2023_consensus <- data_2023_consensus %>% 
+  left_join(house_effects_hist, 
+            by = c("polling_firm","abbrev_candidacies")) %>% 
+  left_join(house_effects_consensus,  
+            by = c("polling_firm","abbrev_candidacies")) 
+
+
+head(data_2023_consensus)
+
+```
+
+### 5.2 DEBIASED PREDICTIONS: pollster-party-specific corrections, so they should reflect how each polling firm deviates from the benchmark for each party
+
+-   we do not need to group by pollster and party as we did it already when calculating the error_avg\_\*
+
+```{r}
+# debiased estimates 
+data_2023_consensus <- data_2023_consensus %>%  
+  mutate(
+    debiased_estimate_avg = estimated_voting - error_avg, 
+    debiased_estimate_MAE_rating = estimated_voting - error_avg_MAE_rating, 
+    debiased_estimate_RMSE_rating = estimated_voting - error_avg_RMSE_rating
+    )
+
+
+head(data_2023_consensus)
+
+# insanity check: 
+data_2023_consensus %>% 
+  group_by(abbrev_candidacies) %>% 
+  summarise(
+    n = n(),
+    firms = n_distinct(polling_firm),
+    na_results = sum(is.na(voting_results_pct)), 
+    na_est = sum(is.na(estimated_voting)), 
+    na_id_survey = sum(is.na(id_survey)), 
+    na_error_avg = sum(is.na(error_avg)), 
+    na_deb_est_avg = sum(is.na(debiased_estimate_avg)),
+    prop_na_deb_est_avg = mean(is.na(debiased_estimate_avg)), 
+    prop_mis_hist_avg = mean(is.na(error_avg)),
+    na_MAE = sum(is.na(error_MAE_rating)), 
+    na_deb_est_MAE = sum(is.na(debiased_estimate_MAE_rating)),
+    prop_na_deb_est_MAE = mean(is.na(debiased_estimate_MAE_rating)), 
+    prop_mis_hist_MAE = mean(is.na(error_MAE_rating)),
+    na_RMSE = sum(is.na(error_RMSE_rating)), 
+    na_deb_est_RMSE = sum(is.na(debiased_estimate_RMSE_rating)),
+    prop_na_deb_est_RMSE = mean(is.na(debiased_estimate_RMSE_rating)), 
+    prop_mis_hist_RMSE = mean(is.na(error_RMSE_rating))
+  )
+
+# stats 
+data_2023_consensus %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    n = n(),
+    real_mean = mean(voting_results_pct), 
+    raw_mean = mean(estimated_voting),
+    hist_mean = mean(debiased_estimate_avg),
+    bMAE_mean = mean(debiased_estimate_MAE_rating),
+    bRMSE_mean = mean(debiased_estimate_RMSE_rating),
+    .groups = "drop"
+  )
+
+```
+
+NOTE: if one is missing, as for example here Bildu has one error_avg value missing, its because the pollster (GESOP in this case) had never polled them before! It is missing because in house_effects_hist (where error_avg comes from) GESOP has no values or polls for Bildu, so that missing value downstreams to the debiased estimates (prop_na_deb_est_avg in this case) TODO: delete for 2 percentage calculations
+
+## 6. Partisan bias: integration of new pollsters in current election
+
+> Partisan bias\*\* = consistent systematic overestimation or underestimation (bias) of a party’s support across most or all polling firms
+
+**Aim**: shrinking the estimates of new pollsters toward broader, more stable baselines, i.e., partial pooling, based on the partisan bias of all pollsters for existing (historical) parties
+
+-   Applied only on new pollsters! Old pollsters get partisan correction already integrated in their house effects!
+
+**Ultimate goal**: to be as "conservative" as possible in the forecasting sense (literature recommends conservative forecasting for better predictions) so it is good to also correct the new pollsters if possible
+
+**Method**: we separately compute party-level partisan bias out of past elections (historical partisan bias, avg technique) and out of current elections benchmark deviations (current partisan bias, mae/rmse technique), and apply those corrections only on new pollsters. Technique as before: debiased estimates based on avg vs mae vs rmse, and comparison of best technique.
+
+-   Historical partisan bias from past elections = average error by party across all previous polls
+-   Current partisan bias from current election = average deviation from the consensus benchmark across established pollsters of the current election only (the `error_MAE`/`error_RMSE` already computed on `data_2023_consensus`)
+
+New pollsters & historical parties:
+
+```{r}
+# new pollsters
+new_pollsters_2023 <- data_2023 %>% 
+  distinct(polling_firm) %>% 
+  filter(!(polling_firm %in% keep_historical)) %>%  # from our reduction of the dataset during the weights computation, where we needed only established pollsters
+  pull()
+
+new_pollsters_2023 # 5 pollsters
+
+# parties we DO correct (non-new in 2023)
+hist_parties_2023 <- data_2023 %>% 
+  filter(first_time == 0) %>% 
+  distinct(abbrev_candidacies) %>% 
+  pull()
+
+hist_parties_2023 # 3 parties (SUMAR is the new party)
+```
+
+### 6.1 Historical partisan bias
+
+Partisan bias documented in the past elections.
+
+```{r}
+party_bias_hist <- data_hist %>% 
+  filter(abbrev_candidacies %in% hist_parties_2023) %>% 
+  summarise( 
+    .by = abbrev_candidacies,
+    partisan_bias_avg = mean(error, na.rm = TRUE),     
+    n_hist = sum(!is.na(error))
+  )
+party_bias_hist
+```
+
+### 6.2 Current partisan bias
+
+Partisan bias documented in the current elections.
+
+```{r}
+party_bias_current <- data_2023_consensus %>% 
+  filter(polling_firm %in% keep_historical, # established pollsters 
+         abbrev_candidacies %in% hist_parties_2023) %>% # historical parties 
+  summarise(
+    .by = abbrev_candidacies,
+    partisan_bias_MAE_rating  = mean(error_MAE_rating,  na.rm = TRUE),
+    partisan_bias_RMSE_rating = mean(error_RMSE_rating, na.rm = TRUE), 
+    n_current = n()
+  )
+
+party_bias_current
+```
+
+We build a new evaluation table that can be used for the new and historical parties
+
+```{r}
+# start from ALL 2023 rows 
+data_2023_eval_full <- data_2023 %>%
+
+  # consensus party totals for later comparisons 
+  left_join(results_consensus, by = "abbrev_candidacies") %>%
+  
+  # firm x party historical correction (may be NA for new pollsters/parties)
+  left_join(house_effects_hist, by = c("polling_firm","abbrev_candidacies")) %>%
+  
+  # bring firm x party consensus correction (only exists for established pollsters)
+  left_join(house_effects_consensus,
+                   by = c("polling_firm","abbrev_candidacies")) %>%
+  
+  # partisan party-level biases
+  left_join(party_bias_hist,  by = "abbrev_candidacies") %>%
+  left_join(party_bias_current, by = "abbrev_candidacies") 
+  
+
+```
+
+Application of total partisan bias consensus corrections only to new pollsters & historical parties (leaving historical parties with house effects corrections & new parties uncorrected) =\> `_partisan` consensus corrections will only affect new pollsters & historical parties
+
+```{r}
+data_2023_eval_full <- data_2023_eval_full %>% 
+  
+  # tagging new pollsters
+  mutate(
+    is_new_pollster = polling_firm %in% new_pollsters_2023
+    ) %>%
+  
+  mutate(  
+    
+    # Average:
+    correction_hist = case_when(
+      first_time == 1 ~ 0, # new party -> we accept as is
+      is_new_pollster ~ coalesce(partisan_bias_avg, 0), # new pollster: partisan bias 
+      TRUE ~ coalesce(error_avg, 0) # established pollsters: house effects bias 
+    ),
+    
+    # Benchmark MAE:
+    correction_bMAE = case_when(
+      first_time == 1 ~ 0,
+      is_new_pollster ~ coalesce(partisan_bias_MAE_rating, 0),
+      TRUE ~ coalesce(error_avg_MAE_rating, 0)           
+    ),
+    
+    # Benchmark RMSE:
+    correction_bRMSE = case_when(
+      first_time == 1 ~ 0,
+      is_new_pollster ~ coalesce(partisan_bias_RMSE_rating, 0),
+      TRUE ~ coalesce(error_avg_RMSE_rating, 0)
+    ),
+    
+    # candidate debiased estimates 
+    debiased_estimate_avg = estimated_voting - correction_hist,
+    debiased_estimate_bMAE = estimated_voting - correction_bMAE,
+    debiased_estimate_bRMSE = estimated_voting - correction_bRMSE
+  )
+
+head(data_2023_eval_full)
+
+
+
+```
+
+# House effects correction and evaluation for 2023: comparison against actual 2023 vote shares
+
+Goal:
+
+1.  Look for house effects in 2023
+2.  Compare MAE / RMSE of (i) raw, (ii) regular (historical), and (iii) benchmark-debiased predictions against actual current vote share.
+
+Comparing the current election's new and established pollsters':
+
+-   
+
+    (i) raw
+
+-   
+
+    (ii) blended regular (historical house effects + historical partisan bias)
+
+-   
+
+    (iii) blended benchmark-debiased (MAE/RMSE house effects + MAE/RMSE house effects)
+
+predictions against actual current vote share.
+
+### House effects presence 2023
+
+We take a closer look at the house effects of the established pollsters for historical parties (not new).
+
+#### 2023 9 worst pollsters by MAE
+
+```{r}
+
+# data for plots 
+plots_23 <- data_2023_eval_full %>%
+  filter(
+    abbrev_candidacies %in% c("VOX", "PP", "PSOE"),
+    polling_firm %in% keep_historical
+  ) %>%
+  mutate(error = estimated_voting - voting_results_pct)
+
+he_23 <- plots_23 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(error_avg = mean(error, na.rm = TRUE), .groups = "drop")
+
+# mae (party-balanced, it is based on error_avg)
+mae_23 <- he_23 %>%
+  group_by(polling_firm) %>%
+  summarise(mae = mean(abs(error_avg), na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mae))
+
+# worst 9 
+worst_9 <- mae_23 %>% slice_head(n = 9) %>%
+  mutate(ranked_name = paste0(row_number(), ". ", polling_firm))
+
+# ranking 
+data_ranked_worst <- he_23 %>%
+  semi_join(worst_9, by = "polling_firm") %>%
+  left_join(select(worst_9, polling_firm, ranked_name), by = "polling_firm")
+
+data_ranked_worst
+
+# Plot 
+ggplot(data_ranked_worst,
+       aes(x = reorder(abbrev_candidacies, error_avg), y = error_avg, fill = abbrev_candidacies)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  scale_fill_manual(values = party_colors) +
+  facet_wrap(~ ranked_name) +
+  coord_flip() +
+  labs(
+    title = "House effects by party for 9 worst-MAE pollsters (2023)",
+    x = "Party", y = "Average bias (Poll − Result, pp)", fill = "Party"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank())
+
+```
+
+#### 2023 9 top pollsters by MAE
+
+```{r}
+
+# top 9 
+top_9 <- mae_23 %>% arrange(mae) %>% slice_head(n = 9) %>%
+  mutate(ranked_name = paste0(row_number(), ". ", polling_firm))
+
+
+# ranking 
+data_ranked_top <- he_23 %>%
+  semi_join(top_9, by = "polling_firm") %>%
+  left_join(select(top_9, polling_firm, ranked_name), by = "polling_firm")
+
+data_ranked_top
+
+# Plot 
+ggplot(data_ranked_top,
+       aes(x = reorder(abbrev_candidacies, error_avg), y = error_avg, fill = abbrev_candidacies)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  scale_fill_manual(values = party_colors) +
+  facet_wrap(~ ranked_name) +
+  coord_flip() +
+  labs(
+    title = "House effects by party for 9 best-MAE pollsters (2023)",
+    x = "Party", y = "Average bias (Poll − Result, pp)", fill = "Party"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank())
+
+```
+
+#### 2023 5 top and worst
+
+```{r}
+# top 5 and worst 5 (with rank within each group)
+top_5 <- mae_23 %>% arrange(mae) %>% slice_head(n = 5) %>%
+  mutate(group = "Top 5", rank = row_number())
+
+worst_5 <- mae_23 %>% arrange(desc(mae)) %>% slice_head(n = 5) %>%
+  mutate(group = "Worst 5", rank = row_number())
+
+# ranks
+rank_table <- bind_rows(top_5, worst_5) %>%
+  mutate(ranked_label = paste0(rank, ". ", polling_firm)) %>%
+  arrange(match(group, c("Top 5","Worst 5")), rank)
+
+rank_table
+
+# Plot 
+he_ranked <- he_23 %>%
+  semi_join(rank_table, by = "polling_firm") %>%
+  left_join(rank_table %>% select(polling_firm, group, ranked_label),
+            by = "polling_firm")
+
+# facet order: first the top row (Top 5), then the bottom (Worst 5)
+panel_levels <- c(
+  rank_table %>% filter(group == "Top 5")   %>% arrange(rank) %>% pull(ranked_label),
+  rank_table %>% filter(group == "Worst 5") %>% arrange(rank) %>% pull(ranked_label)
+)
+
+he_ranked <- he_ranked %>%
+  mutate(panel = ranked_label,
+         panel = factor(panel, levels = panel_levels))
+
+ggplot(he_ranked,
+       aes(x = fct_reorder(abbrev_candidacies, error_avg), y = error_avg,
+           fill = abbrev_candidacies)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(values = party_colors, guide = "none") +
+  coord_flip() +
+  facet_wrap(~ panel, nrow = 2) +
+  labs(
+    title = "House effects by party for Top 5 (top) and Worst 5 (bottom) pollsters — 2023",
+    subtitle = "Bars are average bias per party: (Poll − Result) in percentage points",
+    x = "Party", y = "Average bias (pp)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+
+
+```
+
+#### 2023 bias of pollsters by party
+
+```{r}
+# filtering 
+plot23 <- data_2023_eval_full %>%
+  filter(
+    abbrev_candidacies %in% c("VOX", "PP", "PSOE"),
+    polling_firm %in% keep_historical
+  ) %>%
+  mutate(error = estimated_voting - voting_results_pct)
+
+# mae 
+mae_overall_2023 <- plot23 %>%
+  group_by(polling_firm) %>%
+  summarise(mae_overall = mean(abs(error), na.rm = TRUE), .groups = "drop")
+
+# house effects
+he_summary_2023 <- plot23 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(error_avg = mean(error, na.rm = TRUE), .groups = "drop") %>%
+  left_join(mae_overall_2023, by = "polling_firm") %>%
+  mutate(
+    bias_direction = if_else(error_avg > 0, "Overestimate", "Underestimate"),
+    # ranked by overall MAE; set .desc = TRUE to put least biased at the top
+    polling_firm = fct_reorder(polling_firm, mae_overall, .desc = TRUE)
+  )
+
+
+# plot 
+ggplot(he_summary_2023, aes(x = error_avg, y = polling_firm, fill = bias_direction)) +
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_wrap(~ abbrev_candidacies) +   # same order across facets
+  scale_fill_manual(values = c("Overestimate" = "steelblue", "Underestimate" = "tomato")) +
+  labs(
+    title = "Pollsters’ deviations by party (ordered by overall MAE)",
+    subtitle = "2023",
+    x = "Average Estimation Error (pp)",
+    y = "Pollster",
+    fill = "Bias"
+  ) +
+  theme_minimal()
+
+
+```
+
+#### Historical bias by party
+
+```{r}
+# filter
+plot_hist <- data_hist %>%
+  filter(
+    abbrev_candidacies %in% c("VOX", "PP", "PSOE"),
+    polling_firm %in% keep_historical
+  ) %>%
+  mutate(error = estimated_voting - voting_results_pct)
+
+# last 6 elections 
+recent6_ids <- plot_hist %>%
+  group_by(id_elec) %>%
+  summarise(
+    election_date = as.Date(sub("^02-", "", unique(id_elec))), 
+    elec_date = max(election_date, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(elec_date)) %>%
+  slice_head(n = 6) %>%
+  pull(id_elec)
+
+
+plot_hist <- plot_hist %>%
+  filter(id_elec %in% recent6_ids) %>%
+  mutate(id_elec = factor(id_elec, levels = recent6_ids))
+
+# mae
+mae_overall_hist <- plot_hist %>%
+  group_by(polling_firm) %>%
+  summarise(mae_overall = mean(abs(error), na.rm = TRUE), .groups = "drop")
+
+# house effects 
+he_summary_hist <- plot_hist %>%
+  group_by(id_elec, polling_firm, abbrev_candidacies) %>%
+  summarise(error_avg = mean(error, na.rm = TRUE), .groups = "drop") %>%
+  left_join(mae_overall_hist, by = "polling_firm") %>%
+  mutate(
+    bias_direction = if_else(error_avg > 0, "Overestimate", "Underestimate"),
+    polling_firm = fct_reorder(polling_firm, mae_overall, .desc = TRUE)  # least biased at top
+  )
+
+# Plot 
+ggplot(he_summary_hist,
+       aes(x = error_avg, y = polling_firm, fill = bias_direction)) +
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_grid(id_elec ~ abbrev_candidacies, scales = "free_y") +
+  scale_fill_manual(values = c(Overestimate = "steelblue", Underestimate = "tomato")) +
+  labs(
+    title = "Pollsters’ deviations by party and election (last 6 contests)",
+    subtitle = "Ordered globally by overall MAE (newest election at the top)",
+    x = "Average Estimation Error (pp)",
+    y = "Pollster",
+    fill = "Bias"
+  ) +
+  theme_minimal()
+
+
+```
+
+#### Stability of house effects between 2023 and preceeding election
+
+```{r}
+n_polls23 <- Inf
+
+# preceeding election to 2023
+election_before_2023 <- data_hist %>% 
+  distinct(id_elec) %>% 
+  slice_head() %>% 
+  pull()
+
+# historical house effects
+hist_he <- data_hist %>%
+  filter(abbrev_candidacies %in% c("PP","PSOE","VOX"),
+         polling_firm %in% keep_historical, 
+         id_elec %in% election_before_2023) %>%
+  mutate(error = estimated_voting - voting_results_pct) %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(error_hist = mean(error, na.rm = TRUE),
+            n_hist     = n(), .groups = "drop")
+
+# 2023 house effects 
+plot23 <- data_2023_eval_full %>%
+  filter(abbrev_candidacies %in% c("PP","PSOE","VOX"),
+         polling_firm %in% keep_historical) %>%
+  mutate(
+    error = estimated_voting - voting_results_pct,
+    poll_date = coalesce(fieldwork_end, fieldwork_start)
+  ) %>% 
+  filter(!is.na(poll_date)) %>%
+  arrange(desc(poll_date)) %>%
+  slice_head(n = n_polls23)
+
+he_2023 <- plot23 %>%
+  group_by(polling_firm, abbrev_candidacies) %>%
+  summarise(error_2023 = mean(error, na.rm = TRUE),
+            n_2023     = n(), .groups = "drop")
+
+# join, Plot
+stab <- hist_he %>%
+  inner_join(he_2023, by = c("polling_firm","abbrev_candidacies"))
+
+# symmetric limits & 1:1 aspect
+rng <- max(abs(c(stab$error_hist, stab$error_2023)), na.rm = TRUE)
+
+ggplot(stab, aes(x = error_hist, y = error_2023, colour = abbrev_candidacies)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_point(aes(size = pmin(n_hist, n_2023)), alpha = 0.8) +
+  
+  scale_color_manual(values = party_colors) +
+  coord_equal(xlim = c(-rng, rng), ylim = c(-rng, rng)) +
+  labs(
+    title = "Stability of house effects: historical vs 2023",
+    subtitle = paste0("Each point = pollster x party; 2023 uses last ",
+                      n_polls23, " polls"),
+    x = "Historical house effect (mean signed error, pp)",
+    y = "2023 house effect (mean signed error, pp)",
+    colour = "Party",
+    size = "Obs"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+### House effects corrections
+
+#### New pollsters
+
+```{r}
+comparison_new_pollsters <- data_2023_eval_full %>% 
+  filter(is_new_pollster, first_time == 0) %>% # new pollster, historical parties 
+  summarise(
+    .by = abbrev_candidacies,
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),
+    MAE_avg = mean(abs(debiased_estimate_avg - voting_results_pct), na.rm = TRUE), 
+    MAE_bMAE = mean(abs(debiased_estimate_bMAE - voting_results_pct), na.rm = TRUE),
+    MAE_bRMSE = mean(abs(debiased_estimate_bRMSE - voting_results_pct), na.rm = TRUE)
+  )
+
+comparison_new_pollsters
+
+comparison_new_pollsters_long <- comparison_new_pollsters %>% 
+  pivot_longer(
+    cols = -abbrev_candidacies,
+    names_to = c("metric", "method"),
+    names_sep = "_",
+    values_to = "value"
+  )
+
+comparison_new_pollsters_long$method <- factor(
+  comparison_new_pollsters_long$method, 
+  levels = c("raw", "avg", "bMAE", "bRMSE"))
+
+# levels(comparison_new_pollsters_long$method) # check
+
+# quick summary 
+comparison_new_pollsters_long %>% 
+  group_by(metric, method) %>% 
+  summarise(
+    mean_value = mean(value, na.rm = TRUE), 
+    median_value = median(value, na.rm = TRUE), 
+    .groups = "drop") %>%
+  arrange(metric, mean_value)
+
+```
+
+#### Established pollsters
+
+```{r}
+comparison_hist_pollsters <- data_2023_eval_full %>% 
+  filter(!is_new_pollster, first_time == 0) %>% # established pollsters, historical parties
+  summarise(
+    .by = abbrev_candidacies,
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE),# baseline MAE of the raw (uncorrected) estimated_voting
+    MAE_avg = mean(abs(debiased_estimate_avg - voting_results_pct), na.rm = TRUE), 
+    MAE_bMAE = mean(abs(debiased_estimate_bMAE - voting_results_pct), na.rm = TRUE),
+    MAE_bRMSE = mean(abs(debiased_estimate_bRMSE - voting_results_pct), na.rm = TRUE)
+  )
+
+comparison_hist_pollsters
+
+comparison_hist_pollsters_long <- comparison_hist_pollsters %>% 
+  pivot_longer(
+    cols = -abbrev_candidacies,
+    names_to = c("metric", "method"),
+    names_sep = "_",
+    values_to = "value"
+  )
+
+comparison_hist_pollsters_long$method <- factor(
+  comparison_hist_pollsters_long$method, 
+  levels = c("raw", "avg", "bMAE", "bRMSE"))
+
+# levels(comparison_hist_pollsters_long$method) # check
+
+# quick summary 
+comparison_hist_pollsters_long %>% 
+  group_by(metric, method) %>% 
+  summarise(
+    mean_value = mean(value, na.rm = TRUE), 
+    median_value = median(value, na.rm = TRUE), 
+    .groups = "drop") %>%
+  arrange(metric, mean_value)
+
+
+```
+
+#### All together
+
+```{r}
+
+comparison_all_pollsters <- data_2023_eval_full %>% 
+  summarise(
+    .by = abbrev_candidacies,
+    MAE_raw = mean(abs(estimated_voting - voting_results_pct), na.rm = TRUE), # baseline MAE of the raw (uncorrected) estimated_voting
+    MAE_avg = mean(abs(debiased_estimate_avg - voting_results_pct), na.rm = TRUE), 
+    MAE_bMAE = mean(abs(debiased_estimate_bMAE - voting_results_pct), na.rm = TRUE),
+    MAE_bRMSE = mean(abs(debiased_estimate_bRMSE - voting_results_pct), na.rm = TRUE)
+  )
+
+comparison_all_pollsters_long <- comparison_all_pollsters %>% 
+  pivot_longer(
+    cols = -abbrev_candidacies,
+    names_to = c("metric", "method"),
+    names_sep = "_",
+    values_to = "value"
+  )
+
+
+comparison_all_pollsters_long$method <- factor(
+  comparison_all_pollsters_long$method, 
+  levels = c("raw", "avg", "bMAE", "bRMSE"))
+
+# levels(comparison_all_pollsters_long$method) # check
+
+# quick summary 
+comparison_all_pollsters_long %>% 
+  group_by(metric, method) %>% 
+  summarise(
+    mean_value = mean(value, na.rm = TRUE), 
+    median_value = median(value, na.rm = TRUE), 
+    .groups = "drop") %>%
+  arrange(metric, mean_value)
+```
+
+```{r}
+lvl_methods <- c("raw","avg","bMAE","bRMSE")
+
+# just in case: 
+comparison_new_pollsters_long  <- comparison_new_pollsters_long   %>%  
+  mutate(method = factor(method, levels = lvl_methods))
+
+comparison_hist_pollsters_long <- comparison_hist_pollsters_long %>% 
+  mutate(method = factor(method, levels = lvl_methods))
+
+comparison_all_pollsters_long  <- comparison_all_pollsters_long   %>%  
+  mutate(method = factor(method, levels = lvl_methods))
+
+
+
+comparison_3_long <- bind_rows(
+  comparison_new_pollsters_long  %>% mutate(pollster_type = "New"),
+  comparison_hist_pollsters_long %>% mutate(pollster_type = "Historical"), 
+  comparison_all_pollsters_long %>% mutate(pollster_type = "All"), 
+)
+
+# summary across parties by pollster type × method
+summary_table <- comparison_3_long %>%
+  group_by(pollster_type, metric, method) %>%
+  summarise(
+    mean_error = mean(value, na.rm = TRUE),
+    median_error = median(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(metric, pollster_type, method)
+
+summary_star <- summary_table %>%
+  group_by(pollster_type, metric) %>%
+  mutate(
+    min_mean = min(mean_error,   na.rm = TRUE),
+    min_median = min(median_error, na.rm = TRUE),
+    is_mean_winner   = is.finite(mean_error)   & mean_error   <= min_mean + 1e-12,
+    is_median_winner = is.finite(median_error) & median_error <= min_median + 1e-12,
+    mean_error_disp   = ifelse(is_mean_winner,   sprintf("%.3f ★", mean_error),
+                                                  sprintf("%.3f",    mean_error)),
+    median_error_disp = ifelse(is_median_winner, sprintf("%.3f ★", median_error),
+                                                  sprintf("%.3f",    median_error))
+  ) %>%
+  ungroup() %>%
+  arrange(metric, pollster_type, method) %>%
+  select(pollster_type, metric, method, mean_error_disp, median_error_disp)
+
+summary_star
+
+
+
+```
+
+#### Plots
+
+##### All pollsters predicitions MAE
+
+```{r}
+
+ggplot(
+  comparison_all_pollsters_long %>% filter(metric == "MAE"),
+  aes(x = abbrev_candidacies, y = value, fill = method)
+) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(
+    values = c("raw" = "gold1", "avg" = "orangered",
+               "bMAE" = "darkseagreen3", "bRMSE" = "darkcyan"),
+    labels = c("Raw", "Average", "Bench (MAE)", "Bench (RMSE)")
+  ) +
+  labs(
+    title = paste("MAE by Party and Method - All Pollsters (", unique(data_2023$year), ")", sep = ""),
+    x = "Party", y = "Mean Absolute Error", fill = "Method"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+
+```
+
+##### Comparison of the weighted results against the real voteshare
+
+```{r}
+# avg_result
+avg_results_2023 <- data_2023_consensus %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    avg_prediction = mean(estimated_voting, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# added to the benchmark vs actual dataset
+bench_vs_actual <- results_consensus %>%
+  left_join(
+    data_2023 %>% distinct(abbrev_candidacies, voting_results_pct),
+    by = c("abbrev_candidacies")
+  ) %>%
+  left_join(avg_results_2023, by = c("abbrev_candidacies"))
+
+bench_vs_actual
+
+ggplot(bench_vs_actual %>%
+         mutate(abbrev_candidacies = fct_reorder(abbrev_candidacies, voting_results_pct, .desc = TRUE)),
+       aes(x = abbrev_candidacies, group = abbrev_candidacies)) +
+  # actual voteshare
+  geom_col(aes(y = voting_results_pct, fill = abbrev_candidacies),
+           alpha = 0.65, position = "dodge") +
+  
+  # MAE pollster rating estimations
+  geom_point(aes(y = weighted_results_MAE_rating, shape = "Benchmark (MAE)"),
+             position = position_dodge(width = 0.9), size = 2.5, colour = "black") +
+  
+  # RMSE pollster rating estimations
+  geom_point(aes(y = weighted_results_RMSE_rating, shape = "Benchmark (RMSE)"),
+             position = position_dodge(width = 0.9), size = 2.5, colour = "black") +
+  
+  # Average estimation based on all polls per election (possibly reducing partisan effect?)
+  geom_point(aes(y = avg_prediction, shape = "Average (Unweighted)"),
+             position = position_dodge(width = 0.9), size = 2.5, colour = "red") +
+  
+  scale_fill_manual(values = party_colors, guide = "none") +
+  scale_shape_manual(values = c("Benchmark (MAE)" = 16,   # circle
+                                "Benchmark (RMSE)" = 17,  # triangle
+                                "Average (Unweighted)" = 15), # square
+                    name = "Estimate") +
+  
+  labs(
+    title = "Historical Elections: Weighted Consensus & Average vs Actual Vote Share",
+    subtitle = "Bars = actual results; points = consensus benchmarks; red squares = simple average",
+    x = "Party", y = "Vote Share (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+
+```
+
+##### Comparison of the debiased estimates against the real voteshare
+
+Option 1
+
+```{r}
+# aggregate debiased estimates per election x party
+debiased_summary <- data_2023_consensus %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    avg_raw = mean(estimated_voting, na.rm = TRUE),
+    avg_hist = mean(debiased_estimate_avg, na.rm = TRUE),
+    avg_bMAE = mean(debiased_estimate_MAE_rating, na.rm = TRUE),
+    avg_bRMSE = mean(debiased_estimate_RMSE_rating, na.rm = TRUE),
+    n_polls = n(),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    data_2023 %>% distinct(abbrev_candidacies, voting_results_pct),
+    by = c("abbrev_candidacies")
+  )
+
+# long format for plotting
+debiased_long <- debiased_summary %>%
+  pivot_longer(
+    cols = starts_with("avg_"),
+    names_to = "method", values_to = "estimate"
+  ) %>%
+  mutate(
+    method = recode(method,
+                    "avg_raw" = "Raw",
+                    "avg_hist" = "Hist",
+                    "avg_bMAE" = "Bench (MAE)",
+                    "avg_bRMSE" = "Bench (RMSE)")
+  )
+
+# palette (reuse)
+parties_order <- sort(unique(debiased_long$abbrev_candidacies))
+pal_named <- setNames(rep(party_colors, length.out = length(parties_order)), parties_order)
+
+# plot
+ggplot(debiased_long %>%
+         mutate(abbrev_candidacies = fct_reorder(abbrev_candidacies, voting_results_pct, .desc = TRUE)),
+       aes(x = abbrev_candidacies, y = estimate, colour = method, shape = method)) +
+  # debiased estimates
+  geom_point(position = position_dodge(width = 0.8), size = 2.5) +
+  # actual results (black X)
+  geom_point(aes(x = abbrev_candidacies, y = voting_results_pct,
+                 colour = "Actual", shape = "Actual"),
+             inherit.aes = FALSE, size = 3, stroke = 1.2) +
+  scale_colour_manual(values = c(
+    "Raw" = "gold1",
+    "Hist" = "orangered",
+    "Bench (MAE)" = "darkseagreen3",
+    "Bench (RMSE)" = "darkcyan",
+    "Actual" = "black"
+  )) +
+  scale_shape_manual(values = c(
+    "Raw" = 16,            # circle
+    "Hist" = 17,           # triangle
+    "Bench (MAE)" = 15,    # square
+    "Bench (RMSE)" = 18,   # diamond
+    "Actual" = 4           # X
+  )) +
+  labs(
+    title = "Debiased Estimates vs Actual Vote Share",
+    subtitle = "Coloured points = debiased methods; black X = actual result",
+    x = "Party", y = "Vote Share (%)",
+    colour = "Method", shape = "Method"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+
+
+```
+
+Option 2:
+
+```{r}
+# debiased predictions 
+debiased_summary <- data_2023_consensus %>%
+  group_by(abbrev_candidacies) %>%
+  summarise(
+    avg_raw   = mean(estimated_voting,              na.rm = TRUE),  # raw polls
+    avg_hist  = mean(debiased_estimate_avg,         na.rm = TRUE),  # truth-anchored correction
+    avg_bMAE  = mean(debiased_estimate_MAE_rating,  na.rm = TRUE),  # benchmark (MAE) correction
+    avg_bRMSE = mean(debiased_estimate_RMSE_rating, na.rm = TRUE),  # benchmark (RMSE) correction
+    .groups = "drop"
+  ) %>%
+  left_join(
+    data_2023 %>% distinct(abbrev_candidacies, voting_results_pct),
+    by = "abbrev_candidacies"
+  )
+
+pred_long <- debiased_summary %>%
+  pivot_longer(
+    cols = c(avg_raw, avg_hist, avg_bMAE, avg_bRMSE),
+    names_to = "method",
+    values_to = "estimate"
+  ) %>%
+  mutate(
+    method = recode(method,
+      "avg_raw"   = "Raw",
+      "avg_hist"  = "Hist",
+      "avg_bMAE"  = "Bench (MAE)",
+      "avg_bRMSE" = "Bench (RMSE)"
+    )
+  )
+
+
+pred_long <- pred_long %>%
+  mutate(abbrev_candidacies = forcats::fct_reorder(abbrev_candidacies, voting_results_pct, .desc = TRUE))
+
+# Plot
+ggplot(pred_long, aes(x = abbrev_candidacies, group = abbrev_candidacies)) +
+  # actual results as bars
+  geom_col(aes(y = voting_results_pct, fill = abbrev_candidacies),
+           alpha = 0.65, width = 0.8, position = "dodge") +
+  # four debiased/raw predictions as points with different shapes
+  geom_point(aes(y = estimate, shape = method, colour = method),
+             position = position_dodge(width = 0.6), size = 2.6) +
+  # styling
+  scale_fill_manual(values = party_colors, guide = "none") +
+  scale_colour_manual(values = c(
+    "Raw" = "goldenrod2",
+    "Hist" = "orangered",
+    "Bench (MAE)" = "darkseagreen3",
+    "Bench (RMSE)" = "darkcyan"
+  )) +
+  scale_shape_manual(values = c(
+    "Raw" = 16,           # circle
+    "Hist" = 17,          # triangle
+    "Bench (MAE)" = 15,   # square
+    "Bench (RMSE)" = 18   # diamond
+  )) +
+  labs(
+    title = "2023: Debiased Predictions vs Actual Vote Share",
+    subtitle = "Bars = actual vote share; shapes = prediction variants (raw & debiased)",
+    x = "Party", y = "Vote Share (%)",
+    colour = "Prediction", shape = "Prediction"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+
+
+```
+
+#### lollipop of gaps (raw vs corrected vs actual)
+
+for top parties with the normalised gap (difference divided by actual vote share) so that small parties’ deviations are scaled properly
+
+```{r}
+
+
+# prepare data
+party_lollipop <- data_2023_eval_full%>%
+  group_by(polling_firm) %>% 
+  mutate(
+    gap_raw  = mean(estimated_voting - voting_results_pct) / voting_results_pct,
+    gap_corr = mean(debiased_estimate_bMAE - voting_results_pct) / voting_results_pct, 
+    .groups = "drop"
+    ) %>%
+  select(abbrev_candidacies, voting_results_pct, gap_raw, gap_corr) %>%
+  pivot_longer(cols = starts_with("gap"), names_to = "type", values_to = "gap") %>%
+  mutate(type = recode(type, gap_raw = "Raw", gap_corr = "Corrected"))
+
+# plot
+ggplot(party_lollipop, aes(x = abbrev_candidacies, y = gap, colour = type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 3) +
+  geom_line(aes(group = abbrev_candidacies), colour = "grey60") +
+  coord_flip() +
+  labs(
+    title = "Normalised Polling Gaps by Party",
+    subtitle = "Relative error (Raw vs Corrected) scaled by actual vote share",
+    x = "Party", y = "Relative Gap ( (Estimate - Actual) / Actual )",
+    colour = "Estimate Type"
+  ) +
+  theme_minimal()
+
+```
+
+per party:
+
+```{r}
+pollster_lollipop <- data_2023_eval_full %>%
+  group_by(polling_firm) %>% 
+  mutate(
+    gap_raw  = mean(estimated_voting - voting_results_pct) / voting_results_pct,
+    gap_corr = mean(debiased_estimate_bMAE - voting_results_pct) / voting_results_pct, 
+    .groups = "drop"
+    ) %>%
+  select(polling_firm, abbrev_candidacies, gap_raw, gap_corr) %>%
+  pivot_longer(cols = starts_with("gap"), names_to = "type", values_to = "gap") %>%
+  mutate(type = recode(type, gap_raw = "Raw", gap_corr = "Corrected"))
+
+ggplot(pollster_lollipop, aes(x = polling_firm, y = gap, colour = type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 2) +
+  geom_line(aes(group = interaction(polling_firm, abbrev_candidacies)), 
+            colour = "grey60", alpha = 0.4) +
+  coord_flip() +
+  labs(
+    title = "Normalised Polling Gaps by Pollster",
+    subtitle = "Relative error (Raw vs Corrected) scaled by actual vote share",
+    x = "Pollster", y = "Relative Gap",
+    colour = "Estimate Type"
+  ) +
+  theme_minimal()
+
+```
+
+# Saving data for downstream usage
+
+We continue our analysis in the document "**3. Data Historical house effects calculation**". We save `data_2023_eval_full` for the analysis in "**4. Modeling for improvement of 2023 pollsters predictions**".
+
+```{r}
+saveRDS(data_2023_eval_full, "./data/data_2023_eval_full.rds")
+```
