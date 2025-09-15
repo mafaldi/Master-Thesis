@@ -38,7 +38,7 @@ urls <- unlist(map(years, generate_url))
 # FUNCTION match party names to megadiccionario
 
 
-mega_diccionario <- read.csv("mega_diccionario.csv")
+# mega_diccionario <- read.csv("mega_diccionario.csv")
 
 match_party_names <- function(wiki_names, reference_names, max_dist = 0.20) {
 
@@ -463,9 +463,7 @@ clean_rows <- function(df, electoral_year = NULL) {
         # extract start and end parts
         start_day = as.numeric(str_extract(end_str, "^[0-9]{1,2}")),
         # this does not work for start_month: str_extract(end_str, "[A-Za-z]{3}$"),
-        start_month = # str_extract(end_str, "^[0-9]{1,2}\\s*([A-Za-z]{3})") %>% str_extract("[A-Za-z]{3}"),
-          # # TODO.3 scenarios. split in the middle. if no month at begging (detect), give the other start string the end month. if NA, double the first value.
-          # unispace? try out
+        start_month = str_extract(end_str, "^[0-9]{1,2}\\s*([A-Za-z]{3})") %>% str_extract("[A-Za-z]{3}"),
         end_day = as.numeric(str_extract(end_str, "(?<=–)\\s*[0-9]{1,2}") %>% str_trim()),
         end_month = str_extract(end_str, "[A-Za-z]{3}$"),
 
@@ -586,20 +584,11 @@ extract_polling_data <- function(url, election_year, election_type = NULL) {
 
 # DATA -----------------------------------------------------------------------
 
-# TODO: tidy it so that we can do bind_rows(wiki2023$`2019`, wiki2023$`2021`, wiki2015)
-    # the tidy will happen in clean_rows, which will go outside of the main function
-# TODO: add column id_elec 02-2015-12-20 (national election 02 + date of election)
-# TODO: important to match to the megadiccionario in order to later insert the national id's
-# TODO: add variable: number of days until election through fieldwork_end
-# TODO: make one big mega tabla
-
-
-
 # 2023
 wiki2023 <- extract_polling_data(urls[[1]], 2023)
 View(wiki2023) # YES: 7 tables
 
-walk2(wiki2023, names(wiki2023), ~ write.csv(.x, file = paste0("table_2023_", .y, ".csv"), row.names = FALSE))
+# walk2(wiki2023, names(wiki2023), ~ write.csv(.x, file = paste0("table_2023_", .y, ".csv"), row.names = FALSE))
 
 
 # 2019 November
@@ -615,15 +604,9 @@ View(wiki2019april) # YES: 4 tables
 wiki2016 <- extract_polling_data(urls[[4]], 2016)
 View(wiki2016) # YES: 1 table
 
-
-
-
-# 2015 ---------------------------------------------
+# 2015 
 wiki2015 <- extract_polling_data(urls[[5]], 2015)
 wiki2015 # YES: 5 tables
-View(wiki2015[[5]]) # no dates??
-View(wiki2015[[2]])
-# BUT NO DATES --------------------------------------------------------------
 
 # 2011
 wiki2011 <- extract_polling_data(urls[[6]], 2011)
